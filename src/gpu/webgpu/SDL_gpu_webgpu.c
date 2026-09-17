@@ -2249,7 +2249,10 @@ static bool WEBGPU_INTERNAL_WGSL_ParseResourceDeclaration(WGSLTokenizer *tokeniz
         entry->type = WEBGPU_BIND_GROUP_ENTRY_TYPE_TEXTURE;
         entry->texture.dimension = WEBGPU_INTERNAL_WGSL_TextureTypeToViewDimension(&typeName);
         entry->texture.isMultisampled = WEBGPU_INTERNAL_WGSL_TokenEquals(&typeName, "texture_multisampled_2d");
-        if (inGroupBounds && unfilterable[entry->group][entry->binding]) {
+        // WebGPU forbids the filterable float sample type on multisampled bindings.
+        if (entry->texture.isMultisampled && (typeArgumentCount == 0 || WEBGPU_INTERNAL_WGSL_TokenEquals(&typeArguments[0], "f32"))) {
+            entry->texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
+        } else if (inGroupBounds && unfilterable[entry->group][entry->binding]) {
             entry->texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
         } else {
             entry->texture.sampleType = typeArgumentCount > 0 ? WEBGPU_INTERNAL_WGSL_SampledTypeToSampleType(&typeArguments[0]) : WGPUTextureSampleType_Float;
@@ -2257,9 +2260,8 @@ static bool WEBGPU_INTERNAL_WGSL_ParseResourceDeclaration(WGSLTokenizer *tokeniz
         return true;
     }
 
-    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Unrecognised resource type '%.*s' at @group(%u) @binding(%u)", (int)typeName.length, typeName.begin, entry->group, entry->binding);
-    entry->type = WEBGPU_BIND_GROUP_ENTRY_TYPE_UNKNOWN;
-    return true;
+    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Unrecognised resource type '%.*s' at @group(%u) @binding(%u); binding skipped", (int)typeName.length, typeName.begin, entry->group, entry->binding);
+    return false;
 }
 
 static Uint32 WEBGPU_INTERNAL_ParseBindGroupLayoutEntriesFromShader(const char *shaderSource, size_t shaderSourceLength, WebGPUInferredBindGroupLayoutEntry **storePtr)
@@ -2345,7 +2347,7 @@ static WebGPUShaderBindGroupLayouts *WEBGPU_INTERNAL_GenerateBindGroupLayoutsFor
         switch (parsedEntry->type) {
         case WEBGPU_BIND_GROUP_ENTRY_TYPE_UNKNOWN:
             SDL_LogError(SDL_LOG_CATEGORY_GPU, "Parsed bind group entry has unknown type!");
-            break;
+            continue;
         case WEBGPU_BIND_GROUP_ENTRY_TYPE_SAMPLER:
             entry.sampler.type = parsedEntry->sampler.bindType;
             break;
@@ -2448,7 +2450,7 @@ static WebGPUComputeShaderBindGroupLayouts *WEBGPU_INTERNAL_GenerateBindGroupLay
         switch (parsedEntry->type) {
         case WEBGPU_BIND_GROUP_ENTRY_TYPE_UNKNOWN:
             SDL_LogError(SDL_LOG_CATEGORY_GPU, "Parsed bind group entry has unknown type!");
-            break;
+            continue;
         case WEBGPU_BIND_GROUP_ENTRY_TYPE_SAMPLER:
             entry.sampler.type = parsedEntry->sampler.bindType;
             break;
