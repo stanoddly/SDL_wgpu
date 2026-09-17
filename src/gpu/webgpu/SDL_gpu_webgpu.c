@@ -1298,11 +1298,10 @@ typedef struct WebGPUCommandBuffer
     Uint32 swapchainTextureCapacity;
     WebGPUTextureContainer **acquiredSwapchainTextures;
 
-    // These are used to ensure that the end-user doesn't use a scissor
-    // that's larger than the smallest color target's, since WebGPU disallows
-    // that and will die a horrible, painful death from even considering it
-    Uint32 smallestColorTargetW;
-    Uint32 smallestColorTargetH;
+    // Smallest attachment extent of the current render pass at its bound mip level.
+    // WebGPU rejects viewports and scissors that reach outside it, so they are clamped to it.
+    Uint32 renderAreaW;
+    Uint32 renderAreaH;
 } WebGPUCommandBuffer;
 
 static void
@@ -4546,6 +4545,12 @@ static void WEBGPU_InsertDebugLabel(SDL_GPUCommandBuffer *commandBuffer, const c
     }
 }
 
+static void WEBGPU_INTERNAL_TrackRenderArea(WebGPUCommandBuffer *cmdBuf, WGPUTexture texture, Uint32 mipLevel)
+{
+    cmdBuf->renderAreaW = SDL_min(cmdBuf->renderAreaW, SDL_max(wgpuTextureGetWidth(texture) >> mipLevel, 1));
+    cmdBuf->renderAreaH = SDL_min(cmdBuf->renderAreaH, SDL_max(wgpuTextureGetHeight(texture) >> mipLevel, 1));
+}
+
 static void WEBGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer, const SDL_GPUColorTargetInfo *colorTargetInfos,
                                    Uint32 numColorTargets, const SDL_GPUDepthStencilTargetInfo *depthStencilTargetInfo)
 {
@@ -4558,10 +4563,8 @@ static void WEBGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer, const SD
 
     colorAttachments = (WGPURenderPassColorAttachment *)SDL_calloc(numColorTargets, sizeof(*colorAttachments));
 
-    // these are by default 0, so SDL_min would always favour
-    // them over the texture's dimensions if we didn't do this
-    wrapper->smallestColorTargetW = SDL_MAX_UINT32;
-    wrapper->smallestColorTargetH = SDL_MAX_UINT32;
+    wrapper->renderAreaW = SDL_MAX_UINT32;
+    wrapper->renderAreaH = SDL_MAX_UINT32;
 
     for (int i = 0; i < numColorTargets; i++) {
         WebGPUTexture *texture = ((WebGPUTextureContainer *)colorTargetInfos[i].texture)->activeTexture;
@@ -4573,8 +4576,7 @@ static void WEBGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer, const SD
         colorAttachments[i].storeOp = SDLToWebGPU_StoreOp[colorTargetInfos[i].store_op];
         colorAttachments[i].depthSlice = texture->type == SDL_GPU_TEXTURETYPE_3D ? colorTargetInfos[i].layer_or_depth_plane : WGPU_DEPTH_SLICE_UNDEFINED;
 
-        wrapper->smallestColorTargetW = SDL_min(wrapper->smallestColorTargetW, wgpuTextureGetWidth(((WebGPUTextureContainer *)colorTargetInfos[i].texture)->activeTexture->texture));
-        wrapper->smallestColorTargetH = SDL_min(wrapper->smallestColorTargetH, wgpuTextureGetHeight(((WebGPUTextureContainer *)colorTargetInfos[i].texture)->activeTexture->texture));
+        WEBGPU_INTERNAL_TrackRenderArea(wrapper, texture->texture, colorTargetInfos[i].mip_level);
 
         switch (((WebGPUTextureContainer *)colorTargetInfos[i].texture)->activeTexture->type) {
         case SDL_GPU_TEXTURETYPE_3D:
@@ -4605,6 +4607,7 @@ static void WEBGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer, const SD
 
     if (depthStencilTargetInfo != NULL) {
         SDL_GPUTextureFormat textureFormat = ((WebGPUTextureContainer *)depthStencilTargetInfo->texture)->header.info.format;
+        WEBGPU_INTERNAL_TrackRenderArea(wrapper, ((WebGPUTextureContainer *)depthStencilTargetInfo->texture)->activeTexture->texture, depthStencilTargetInfo->mip_level);
         depthStencilAttachment = (WGPURenderPassDepthStencilAttachment *)SDL_calloc(1, sizeof(*depthStencilAttachment));
 
         depthStencilAttachment->depthClearValue = depthStencilTargetInfo->clear_depth;
@@ -4634,7 +4637,15 @@ static void WEBGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer, const SD
 
 static void WEBGPU_SetViewport(SDL_GPUCommandBuffer *renderPass, const SDL_GPUViewport *viewport)
 {
-    wgpuRenderPassEncoderSetViewport(((WebGPUCommandBuffer *)renderPass)->renderPassEncoder, viewport->x, viewport->y, viewport->w, viewport->h, viewport->min_depth, viewport->max_depth);
+    WebGPUCommandBuffer *cmdBuf = (WebGPUCommandBuffer *)renderPass;
+    float x = SDL_clamp(viewport->x, 0.0f, (float)cmdBuf->renderAreaW);
+    float y = SDL_clamp(viewport->y, 0.0f, (float)cmdBuf->renderAreaH);
+    float w = SDL_clamp(viewport->x + viewport->w, x, (float)cmdBuf->renderAreaW) - x;
+    float h = SDL_clamp(viewport->y + viewport->h, y, (float)cmdBuf->renderAreaH) - y;
+    float minDepth = SDL_clamp(viewport->min_depth, 0.0f, 1.0f);
+    float maxDepth = SDL_clamp(viewport->max_depth, minDepth, 1.0f);
+
+    wgpuRenderPassEncoderSetViewport(cmdBuf->renderPassEncoder, x, y, w, h, minDepth, maxDepth);
 }
 
 static void WEBGPU_PushVertexUniformData(SDL_GPUCommandBuffer *commandBuffer, Uint32 slotIndex, const void *data, uint32_t length)
@@ -4703,16 +4714,16 @@ static void WEBGPU_SetBlendConstants(SDL_GPUCommandBuffer *commandBuffer, SDL_FC
     wgpuRenderPassEncoderSetBlendConstant(((WebGPUCommandBuffer *)commandBuffer)->renderPassEncoder, &(WGPUColor){ blendConstants.a, blendConstants.r, blendConstants.g, blendConstants.b });
 }
 
+// Native backends accept rects that hang over the render area; WebGPU does not, so clamp to keep them equivalent.
 static void WEBGPU_SetScissor(SDL_GPUCommandBuffer *commandBuffer, const SDL_Rect *scissor)
 {
-    if ((scissor->w <= ((WebGPUCommandBuffer *)commandBuffer)->smallestColorTargetW) &&
-        (scissor->h <= ((WebGPUCommandBuffer *)commandBuffer)->smallestColorTargetH)) {
-        wgpuRenderPassEncoderSetScissorRect(((WebGPUCommandBuffer *)commandBuffer)->renderPassEncoder, scissor->x, scissor->y, scissor->w, scissor->h);
-    } else if (((WebGPUCommandBuffer *)commandBuffer)->renderer->debugMode) {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Attempting to use a scissor of size (%u, %u) with a "
-                                           "smaller render target of size (%u, %u)! This is disallowed by the WebGPU spec.",
-                     scissor->w, scissor->h, ((WebGPUCommandBuffer *)commandBuffer)->smallestColorTargetW, ((WebGPUCommandBuffer *)commandBuffer)->smallestColorTargetH);
-    }
+    WebGPUCommandBuffer *cmdBuf = (WebGPUCommandBuffer *)commandBuffer;
+    Uint32 x = (Uint32)SDL_clamp(scissor->x, 0, (int)cmdBuf->renderAreaW);
+    Uint32 y = (Uint32)SDL_clamp(scissor->y, 0, (int)cmdBuf->renderAreaH);
+    Uint32 w = (Uint32)SDL_clamp(scissor->x + scissor->w, (int)x, (int)cmdBuf->renderAreaW) - x;
+    Uint32 h = (Uint32)SDL_clamp(scissor->y + scissor->h, (int)y, (int)cmdBuf->renderAreaH) - y;
+
+    wgpuRenderPassEncoderSetScissorRect(cmdBuf->renderPassEncoder, x, y, w, h);
 }
 
 static bool WEBGPU_WaitAndAcquireSwapchainTexture(SDL_GPUCommandBuffer *command_buffer, SDL_Window *window, SDL_GPUTexture **swapchain_texture, Uint32 *swapchain_texture_width, Uint32 *swapchain_texture_height)

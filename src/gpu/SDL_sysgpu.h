@@ -70,6 +70,9 @@ typedef struct RenderPass
     SDL_GPUTexture *color_targets[MAX_COLOR_TARGET_BINDINGS];
     Uint32 num_color_targets;
     SDL_GPUTexture *depth_stencil_target;
+    // Smallest attachment extent at its bound mip level; viewports and scissors must fit inside it.
+    Uint32 render_area_width;
+    Uint32 render_area_height;
 
     SDL_GPUGraphicsPipeline *graphics_pipeline;
 
