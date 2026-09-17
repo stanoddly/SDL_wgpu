@@ -796,6 +796,9 @@ typedef struct WebGPURenderer
     bool destroyingSelf;
     bool preferLowPower;
     bool deviceLost;
+    bool ownsInstance;
+    bool ownsAdapter;
+    bool ownsDevice;
 } WebGPURenderer;
 
 struct WebGPUWindowData
@@ -1559,6 +1562,20 @@ static void WEBGPU_INTERNAL_RequestAdapter(WebGPURenderer *renderer, bool *succe
         wgpuInstanceWaitAny(renderer->instance, 1, &waitInfo, 0);
         SDL_DelayNS(100);
     }
+}
+
+static bool WEBGPU_INTERNAL_DeviceHasRequiredFeatures(WGPUDevice device)
+{
+    bool result = true;
+
+    for (int i = 0; i < SDL_arraysize(WEBGPU_INTERNAL_RequiredFeatures); i++) {
+        if (!wgpuDeviceHasFeature(device, WEBGPU_INTERNAL_RequiredFeatures[i])) {
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "WebGPU device does not have required feature \"%s\"!", WEBGPU_FeatureNameToString(WEBGPU_INTERNAL_RequiredFeatures[i]));
+            result = false;
+        }
+    }
+
+    return result;
 }
 
 static void WEBGPU_INTERNAL_RequestDevice(WebGPURenderer *renderer, bool *success)
@@ -5335,6 +5352,41 @@ static SDL_GPUFence *WEBGPU_SubmitAndAcquireFence(SDL_GPUCommandBuffer *commandB
     return (SDL_GPUFence *)WEBGPU_INTERNAL_CreateFence(((WebGPUCommandBuffer *)commandBuffer)->queue);
 }
 
+static void WEBGPU_INTERNAL_ReleaseWebGPUObjects(WebGPURenderer *renderer)
+{
+    if (renderer->queue != NULL) {
+        wgpuQueueRelease(renderer->queue);
+    }
+    if (renderer->device != NULL) {
+        // FIXME: Releasing an SDL-created device leaks a bunch of memory each time!!! There's 100% some resource I'm not freeing.
+        // For an adopted device this only drops the reference SDL took when adopting it.
+        if (!renderer->ownsDevice) {
+            wgpuDeviceRelease(renderer->device);
+        }
+    }
+    if (renderer->adapter != NULL) {
+        wgpuAdapterRelease(renderer->adapter);
+    }
+    if (renderer->instance != NULL) {
+        wgpuInstanceRelease(renderer->instance);
+    }
+}
+
+// Tears down a renderer that failed part-way through WEBGPU_CreateDevice.
+static void WEBGPU_INTERNAL_DestroyPartialRenderer(WebGPURenderer *renderer)
+{
+    WEBGPU_INTERNAL_ReleaseWebGPUObjects(renderer);
+
+    SDL_DestroyMutex(renderer->queryingFenceLock);
+    SDL_DestroyMutex(renderer->destroyingSelfLock);
+    SDL_DestroyMutex(renderer->registeringQueuedDestroyLock);
+    SDL_DestroyMutex(renderer->submittingCommandBufferLock);
+    SDL_DestroyMutex(renderer->creatingWebGPUResourceLock);
+    SDL_DestroyHashTable(renderer->bindGroupHashTable);
+    SDL_DestroyProperties(renderer->props);
+    SDL_free(renderer);
+}
+
 static void WEBGPU_DestroyDevice(SDL_GPUDevice *device)
 
 {
@@ -5362,11 +5414,7 @@ static void WEBGPU_DestroyDevice(SDL_GPUDevice *device)
     SDL_DestroyMutex(renderer->submittingCommandBufferLock);
     SDL_DestroyMutex(renderer->creatingWebGPUResourceLock);
 
-    wgpuQueueRelease(renderer->queue);
-    // FIXME: Releasing the device leaks a bunch of memory each time!!! There's 100% some resource I'm not freeing.
-    // wgpuDeviceRelease(renderer->device);
-    wgpuAdapterRelease(renderer->adapter);
-    wgpuInstanceRelease(renderer->instance);
+    WEBGPU_INTERNAL_ReleaseWebGPUObjects(renderer);
 
     SDL_DestroyHashTable(renderer->bindGroupHashTable);
 
@@ -5933,34 +5981,65 @@ static SDL_GPUDevice *WEBGPU_CreateDevice(bool debugMode, bool preferLowPower, S
         SDL_Log("Failed to copy properties! Oh no!\n%s", SDL_GetError());
     }
 
+    WGPUInstance externalInstance = SDL_GetPointerProperty(props, SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_INSTANCE_POINTER, NULL);
+    WGPUAdapter externalAdapter = SDL_GetPointerProperty(props, SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_ADAPTER_POINTER, NULL);
+    WGPUDevice externalDevice = SDL_GetPointerProperty(props, SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_DEVICE_POINTER, NULL);
+
+    if (externalDevice != NULL && externalAdapter == NULL) {
+        SDL_SetError("SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_DEVICE_POINTER requires SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_ADAPTER_POINTER");
+        WEBGPU_INTERNAL_DestroyPartialRenderer(renderer);
+        return NULL;
+    }
+
+    if (externalInstance != NULL) {
+        wgpuInstanceAddRef(externalInstance);
+        renderer->instance = externalInstance;
+    } else {
 // I do not like MSVC.
 #ifdef _MSC_VER
-    renderer->instance = wgpuCreateInstance(&(WGPUInstanceDescriptor)WGPU_INSTANCE_DESCRIPTOR_INIT);
+        renderer->instance = wgpuCreateInstance(&(WGPUInstanceDescriptor)WGPU_INSTANCE_DESCRIPTOR_INIT);
 #else
-    renderer->instance = wgpuCreateInstance(&WGPU_INSTANCE_DESCRIPTOR_INIT);
+        renderer->instance = wgpuCreateInstance(&WGPU_INSTANCE_DESCRIPTOR_INIT);
 #endif
+        renderer->ownsInstance = true;
+    }
 
     if (!renderer->instance) {
-        SDL_free(renderer);
+        SDL_SetError("Could not create WebGPU instance!");
+        WEBGPU_INTERNAL_DestroyPartialRenderer(renderer);
         return NULL;
     }
 
-    WEBGPU_INTERNAL_RequestAdapter(renderer, &getAdapterSucceeded);
+    if (externalAdapter != NULL) {
+        wgpuAdapterAddRef(externalAdapter);
+        renderer->adapter = externalAdapter;
+    } else {
+        WEBGPU_INTERNAL_RequestAdapter(renderer, &getAdapterSucceeded);
+        renderer->ownsAdapter = true;
+    }
 
     if (!renderer->adapter) {
-        wgpuInstanceRelease(renderer->instance);
-
-        SDL_free(renderer);
+        SDL_SetError("Could not get WebGPU adapter!");
+        WEBGPU_INTERNAL_DestroyPartialRenderer(renderer);
         return NULL;
     }
 
-    WEBGPU_INTERNAL_RequestDevice(renderer, &getDeviceSucceeded);
+    if (externalDevice != NULL) {
+        if (!WEBGPU_INTERNAL_DeviceHasRequiredFeatures(externalDevice)) {
+            SDL_SetError("Adopted WebGPU device lacks required features, see the log");
+            WEBGPU_INTERNAL_DestroyPartialRenderer(renderer);
+            return NULL;
+        }
+        wgpuDeviceAddRef(externalDevice);
+        renderer->device = externalDevice;
+    } else {
+        WEBGPU_INTERNAL_RequestDevice(renderer, &getDeviceSucceeded);
+        renderer->ownsDevice = true;
+    }
 
     if (!renderer->device) {
-        wgpuAdapterRelease(renderer->adapter);
-        wgpuInstanceRelease(renderer->instance);
-
-        SDL_free(renderer);
+        SDL_SetError("Could not get WebGPU device!");
+        WEBGPU_INTERNAL_DestroyPartialRenderer(renderer);
         return NULL;
     }
 
