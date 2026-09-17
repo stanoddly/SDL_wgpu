@@ -1916,7 +1916,10 @@ static bool WEBGPU_Wait(SDL_GPURenderer *driverData)
 // order and comments are ignored.
 
 // Texture i sits at binding 2i and its sampler at 2i + 1, so directives address twice the sampler slot count.
-#define WGSL_MAX_DIRECTIVE_BINDINGS (2 * MAX_TEXTURE_SAMPLERS_PER_STAGE)
+#define WEBGPU_INTERNAL_WGSL_MAX_DIRECTIVE_BINDINGS (2 * MAX_TEXTURE_SAMPLERS_PER_STAGE)
+
+#define WEBGPU_INTERNAL_WGSL_ATTRIBUTE_ABSENT      -1
+#define WEBGPU_INTERNAL_WGSL_ATTRIBUTE_NOT_LITERAL -2
 
 typedef struct WGSLToken
 {
@@ -2052,13 +2055,14 @@ static int WEBGPU_INTERNAL_WGSL_TokenToInt(const WGSLToken *token)
 }
 
 // Parses "(N)" after "@group" or "@binding". Returns -1 if the argument is not a literal.
+// Returns the index, or WEBGPU_INTERNAL_WGSL_ATTRIBUTE_NOT_LITERAL when the argument is not an integer literal.
 static int WEBGPU_INTERNAL_WGSL_ParseAttributeIndex(WGSLTokenizer *tokenizer)
 {
     WGSLToken token;
-    int value = -1;
+    int value = WEBGPU_INTERNAL_WGSL_ATTRIBUTE_NOT_LITERAL;
 
     if (!WEBGPU_INTERNAL_WGSL_AcceptChar(tokenizer, '(')) {
-        return -1;
+        return WEBGPU_INTERNAL_WGSL_ATTRIBUTE_NOT_LITERAL;
     }
 
     if (WEBGPU_INTERNAL_WGSL_NextToken(tokenizer, &token) && SDL_isdigit((unsigned char)token.begin[0])) {
@@ -2135,7 +2139,7 @@ static WGPUTextureSampleType WEBGPU_INTERNAL_WGSL_SampledTypeToSampleType(const 
 // Finds every "SDLGPU_ForceAllowSamplingForTexture(group, binding)" directive, which marks a
 // float texture as unfilterable so a depth texture declared as texture_2d<f32> can still be
 // sampled. The directive normally lives in a comment next to the declaration.
-static void WEBGPU_INTERNAL_WGSL_CollectUnfilterableTextureDirectives(const char *source, size_t sourceLength, bool unfilterable[4][WGSL_MAX_DIRECTIVE_BINDINGS])
+static void WEBGPU_INTERNAL_WGSL_CollectUnfilterableTextureDirectives(const char *source, size_t sourceLength, bool unfilterable[4][WEBGPU_INTERNAL_WGSL_MAX_DIRECTIVE_BINDINGS])
 {
     static const char directive[] = "SDLGPU_ForceAllowSamplingForTexture";
     const size_t directiveLength = sizeof(directive) - 1;
@@ -2152,7 +2156,7 @@ static void WEBGPU_INTERNAL_WGSL_CollectUnfilterableTextureDirectives(const char
                 SDL_isdigit((unsigned char)group.begin[0]) && SDL_isdigit((unsigned char)binding.begin[0])) {
                 int groupIndex = WEBGPU_INTERNAL_WGSL_TokenToInt(&group);
                 int bindingIndex = WEBGPU_INTERNAL_WGSL_TokenToInt(&binding);
-                if (groupIndex >= 0 && groupIndex < 4 && bindingIndex >= 0 && bindingIndex < WGSL_MAX_DIRECTIVE_BINDINGS) {
+                if (groupIndex >= 0 && groupIndex < 4 && bindingIndex >= 0 && bindingIndex < WEBGPU_INTERNAL_WGSL_MAX_DIRECTIVE_BINDINGS) {
                     unfilterable[groupIndex][bindingIndex] = true;
                 } else {
                     SDL_LogWarn(SDL_LOG_CATEGORY_GPU, "SDLGPU_ForceAllowSamplingForTexture(%d, %d) is out of range and ignored", groupIndex, bindingIndex);
@@ -2170,7 +2174,7 @@ static void WEBGPU_INTERNAL_WGSL_CollectUnfilterableTextureDirectives(const char
 
 // Parses what follows "var" in a resource declaration and fills in the entry. Returns false for
 // declarations that do not bind a resource SDL_GPU manages (uniform buffers, workgroup and private variables).
-static bool WEBGPU_INTERNAL_WGSL_ParseResourceDeclaration(WGSLTokenizer *tokenizer, bool unfilterable[4][WGSL_MAX_DIRECTIVE_BINDINGS], WebGPUInferredBindGroupLayoutEntry *entry)
+static bool WEBGPU_INTERNAL_WGSL_ParseResourceDeclaration(WGSLTokenizer *tokenizer, bool unfilterable[4][WEBGPU_INTERNAL_WGSL_MAX_DIRECTIVE_BINDINGS], WebGPUInferredBindGroupLayoutEntry *entry)
 {
     WGSLToken addressSpace[2] = { 0 };
     WGSLToken typeArguments[2] = { 0 };
@@ -2178,7 +2182,7 @@ static bool WEBGPU_INTERNAL_WGSL_ParseResourceDeclaration(WGSLTokenizer *tokeniz
     WGSLToken token;
     Uint32 addressSpaceCount = 0;
     Uint32 typeArgumentCount = 0;
-    bool inGroupBounds = entry->group < 4 && entry->binding < WGSL_MAX_DIRECTIVE_BINDINGS;
+    bool inGroupBounds = entry->group < 4 && entry->binding < WEBGPU_INTERNAL_WGSL_MAX_DIRECTIVE_BINDINGS;
 
     if (WEBGPU_INTERNAL_WGSL_AcceptChar(tokenizer, '<')) {
         addressSpaceCount = WEBGPU_INTERNAL_WGSL_ParseTemplateList(tokenizer, addressSpace, SDL_arraysize(addressSpace));
@@ -2265,13 +2269,13 @@ static Uint32 WEBGPU_INTERNAL_ParseBindGroupLayoutEntriesFromShader(const char *
     Uint32 entryCount = 0;
     Uint32 entryCapacity = 0;
 
-    bool unfilterable[4][WGSL_MAX_DIRECTIVE_BINDINGS] = { 0 };
+    bool unfilterable[4][WEBGPU_INTERNAL_WGSL_MAX_DIRECTIVE_BINDINGS] = { 0 };
     WEBGPU_INTERNAL_WGSL_CollectUnfilterableTextureDirectives(shaderSource, shaderSourceLength, unfilterable);
 
     WGSLTokenizer tokenizer = { shaderSource, shaderSource + shaderSourceLength };
     WGSLToken token;
-    int group = -1;
-    int binding = -1;
+    int group = WEBGPU_INTERNAL_WGSL_ATTRIBUTE_ABSENT;
+    int binding = WEBGPU_INTERNAL_WGSL_ATTRIBUTE_ABSENT;
 
     while (WEBGPU_INTERNAL_WGSL_NextToken(&tokenizer, &token)) {
         if (WEBGPU_INTERNAL_WGSL_TokenIsChar(&token, '@')) {
@@ -2287,8 +2291,8 @@ static Uint32 WEBGPU_INTERNAL_ParseBindGroupLayoutEntriesFromShader(const char *
                 WEBGPU_INTERNAL_WGSL_SkipBalanced(&tokenizer, '(', ')');
             }
         } else if (WEBGPU_INTERNAL_WGSL_TokenEquals(&token, "var")) {
-            if ((group >= 0) != (binding >= 0)) {
-                SDL_LogError(SDL_LOG_CATEGORY_GPU, "Resource declaration with @group(%d) @binding(%d) skipped; both must be integer literals", group, binding);
+            if (group == WEBGPU_INTERNAL_WGSL_ATTRIBUTE_NOT_LITERAL || binding == WEBGPU_INTERNAL_WGSL_ATTRIBUTE_NOT_LITERAL || (group >= 0) != (binding >= 0)) {
+                SDL_LogError(SDL_LOG_CATEGORY_GPU, "Resource declaration skipped; @group and @binding must both be present with integer literal arguments");
             } else if (group >= 0 && binding >= 0) {
                 WebGPUInferredBindGroupLayoutEntry entry = { 0 };
                 entry.group = (Uint32)group;
@@ -2297,11 +2301,11 @@ static Uint32 WEBGPU_INTERNAL_ParseBindGroupLayoutEntriesFromShader(const char *
                     WEBGPU_INTERNAL_InsertElementIntoArray(entries, entryCapacity, entryCount, WebGPUInferredBindGroupLayoutEntry, entry);
                 }
             }
-            group = -1;
-            binding = -1;
+            group = WEBGPU_INTERNAL_WGSL_ATTRIBUTE_ABSENT;
+            binding = WEBGPU_INTERNAL_WGSL_ATTRIBUTE_ABSENT;
         } else if (WEBGPU_INTERNAL_WGSL_TokenIsChar(&token, ';') || WEBGPU_INTERNAL_WGSL_TokenIsChar(&token, '{') || WEBGPU_INTERNAL_WGSL_TokenIsChar(&token, '}') || WEBGPU_INTERNAL_WGSL_TokenEquals(&token, "fn") || WEBGPU_INTERNAL_WGSL_TokenEquals(&token, "struct")) {
-            group = -1;
-            binding = -1;
+            group = WEBGPU_INTERNAL_WGSL_ATTRIBUTE_ABSENT;
+            binding = WEBGPU_INTERNAL_WGSL_ATTRIBUTE_ABSENT;
         }
     }
 
@@ -2698,6 +2702,10 @@ static void WEBGPU_INTERNAL_HandlePendingDestroys(WebGPURenderer *renderer)
                 // The fence callback writes into the fence, so it can only be freed once signaled.
                 if (WEBGPU_INTERNAL_QueryFence(renderer, current->resource.fence)) {
                     SDL_free(current->resource.fence);
+                    wasReleased = true;
+                } else if (forciblyDestroy) {
+                    // Leak it on purpose rather than free memory a late callback could still write to.
+                    SDL_LogWarn(SDL_LOG_CATEGORY_GPU, "Fence never signaled; dropping it from the destroy queue without freeing.");
                     wasReleased = true;
                 }
                 break;
@@ -5292,6 +5300,8 @@ static void WEBGPU_INTERNAL_UploadQueuedUniformData(WebGPUCommandBuffer *cmdBuf)
         wgpuQueueWriteBuffer(cmdBuf->queue, cmdBuf->renderer->uniformBuffers[upload.slot]->activeBuffer->buffer, upload.offset, upload.data, upload.length);
         SDL_free(upload.data);
     }
+
+    cmdBuf->numQueuedUniformUploads = 0;
 }
 
 static bool WEBGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
