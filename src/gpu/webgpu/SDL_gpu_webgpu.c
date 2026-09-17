@@ -870,7 +870,7 @@ typedef struct WebGPURenderer
     bool debugMode;
     bool destroyingSelf;
     bool preferLowPower;
-    bool shouldRecreateLostDevice;
+    bool deviceLost;
 } WebGPURenderer;
 
 struct WebGPUWindowData
@@ -1393,10 +1393,10 @@ WEBGPU_INTERNAL_FenceCallback(WGPUQueueWorkDoneStatus status, WGPUStringView mes
 static void
 WEBGPU_INTERNAL_UncapturedErrorCallback(WGPUDevice const *device, WGPUErrorType type, WGPUStringView message, void *renderer, void *unused)
 {
-    SDL_LogError(SDL_LOG_CATEGORY_GPU, "WebGPU uncaptured error!\n%s", message.data);
+    SDL_LogError(SDL_LOG_CATEGORY_GPU, "WebGPU uncaptured error (type %d): %.*s", (int)type, (int)message.length, message.data);
 
     if (((WebGPURenderer *)renderer)->debugMode) {
-        SDL_assert_release(!"Uncaptured WebGPU error! SDL won't let me format this message though so check the console or smth");
+        SDL_assert_release(!"Uncaptured WebGPU error, see the log for the message");
     }
 }
 
@@ -1412,38 +1412,14 @@ static SDL_PropertiesID WEBGPU_GetDeviceProperties(
     return renderer->props;
 }
 
-// forward decl
-static void WEBGPU_INTERNAL_RequestDevice(WebGPURenderer *renderer, bool *success);
-
+// Every resource belongs to the lost device, so there is nothing useful to recreate here.
+// This callback may run inside a WebGPU callback on the browser main thread, so it must not wait on anything.
 static void WEBGPU_INTERNAL_DeviceLostCallback(WGPUDevice const *device, WGPUDeviceLostReason reason, WGPUStringView message, void *renderer, void *unused)
 {
-    bool debugMode = ((WebGPURenderer *)renderer)->debugMode;
+    ((WebGPURenderer *)renderer)->deviceLost = true;
 
-    if (debugMode) {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Device has been lost.");
-    }
-
-    if (((WebGPURenderer *)renderer)->shouldRecreateLostDevice && !((WebGPURenderer *)renderer)->destroyingSelf) {
-        // Since the device has been lost, there might be some larger issues within WebGPU.
-        // We'll double check that everything's in order.
-
-        if (((WebGPURenderer *)renderer)->instance == NULL) {
-            SDL_LogError(SDL_LOG_CATEGORY_GPU, "WebGPU instance has been lost. It's so joever.");
-            return;
-        }
-
-        if (((WebGPURenderer *)renderer)->adapter == NULL) {
-            // TODO: We should just recreate the adapter if it's lost.
-            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Adapter is lost. It's so joever");
-        }
-
-        if (debugMode) {
-            SDL_LogDebug(SDL_LOG_CATEGORY_GPU, "Attempting to recreate WebGPU device.");
-        }
-
-        WEBGPU_INTERNAL_RequestDevice(renderer, NULL);
-    } else {
-        return;
+    if (reason != WGPUDeviceLostReason_Destroyed || !((WebGPURenderer *)renderer)->destroyingSelf) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "WebGPU device has been lost (reason %d): %.*s", (int)reason, (int)message.length, message.data);
     }
 }
 
@@ -1788,6 +1764,12 @@ static SDL_GPUCommandBuffer *WEBGPU_AcquireCommandBuffer(SDL_GPURenderer *device
     // which is the exact opposite of what a command buffer is in SDL_GPU.
     // So, I had to do this gross hack. God, please forgive me.
     WebGPUCommandBuffer *wrapper;
+
+    if (((WebGPURenderer *)device)->deviceLost) {
+        SDL_SetError("WebGPU device has been lost");
+        return NULL;
+    }
+
     wrapper = (WebGPUCommandBuffer *)SDL_calloc(1, sizeof(*wrapper));
 
     wrapper->renderer = (WebGPURenderer *)device;
@@ -5938,7 +5920,6 @@ static SDL_GPUDevice *WEBGPU_CreateDevice(bool debugMode, bool preferLowPower, S
 
     renderer->debugMode = debugMode;
     renderer->preferLowPower = preferLowPower;
-    renderer->shouldRecreateLostDevice = true;
     renderer->props = SDL_CreateProperties();
     renderer->bindGroupsExpireAfter = bindGroupsExpireAfter;
     renderer->maxFramesInFlight = 2; // Default
