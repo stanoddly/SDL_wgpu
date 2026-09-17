@@ -795,7 +795,7 @@ typedef struct WebGPURenderer
     bool debugMode;
     bool destroyingSelf;
     bool preferLowPower;
-    bool deviceLost;
+    SDL_AtomicInt deviceLost;
     bool ownsDevice;
 } WebGPURenderer;
 
@@ -1339,7 +1339,7 @@ static SDL_PropertiesID WEBGPU_GetDeviceProperties(
 // This callback may run inside a WebGPU callback on the browser main thread, so it must not wait on anything.
 static void WEBGPU_INTERNAL_DeviceLostCallback(WGPUDevice const *device, WGPUDeviceLostReason reason, WGPUStringView message, void *renderer, void *unused)
 {
-    ((WebGPURenderer *)renderer)->deviceLost = true;
+    SDL_SetAtomicInt(&((WebGPURenderer *)renderer)->deviceLost, 1);
 
     if (reason != WGPUDeviceLostReason_Destroyed || !((WebGPURenderer *)renderer)->destroyingSelf) {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "WebGPU device has been lost (reason %d): %.*s", (int)reason, (int)message.length, message.data);
@@ -1704,7 +1704,7 @@ static SDL_GPUCommandBuffer *WEBGPU_AcquireCommandBuffer(SDL_GPURenderer *device
     // So, I had to do this gross hack. God, please forgive me.
     WebGPUCommandBuffer *wrapper;
 
-    if (((WebGPURenderer *)device)->deviceLost) {
+    if (SDL_GetAtomicInt(&((WebGPURenderer *)device)->deviceLost)) {
         SDL_SetError("WebGPU device has been lost");
         return NULL;
     }
@@ -1918,8 +1918,8 @@ static bool WEBGPU_Wait(SDL_GPURenderer *driverData)
 // Texture i sits at binding 2i and its sampler at 2i + 1, so directives address twice the sampler slot count.
 #define WEBGPU_INTERNAL_WGSL_MAX_DIRECTIVE_BINDINGS (2 * MAX_TEXTURE_SAMPLERS_PER_STAGE)
 
-#define WEBGPU_INTERNAL_WGSL_ATTRIBUTE_ABSENT      -1
-#define WEBGPU_INTERNAL_WGSL_ATTRIBUTE_NOT_LITERAL -2
+#define WEBGPU_INTERNAL_WGSL_ATTRIBUTE_ABSENT      (-1)
+#define WEBGPU_INTERNAL_WGSL_ATTRIBUTE_NOT_LITERAL (-2)
 
 typedef struct WGSLToken
 {
@@ -2054,8 +2054,7 @@ static int WEBGPU_INTERNAL_WGSL_TokenToInt(const WGSLToken *token)
     return (int)SDL_strtol(buffer, NULL, 0);
 }
 
-// Parses "(N)" after "@group" or "@binding". Returns -1 if the argument is not a literal.
-// Returns the index, or WEBGPU_INTERNAL_WGSL_ATTRIBUTE_NOT_LITERAL when the argument is not an integer literal.
+// Parses "(N)" after "@group" or "@binding". Returns the index, or WEBGPU_INTERNAL_WGSL_ATTRIBUTE_NOT_LITERAL when the argument is not an integer literal.
 static int WEBGPU_INTERNAL_WGSL_ParseAttributeIndex(WGSLTokenizer *tokenizer)
 {
     WGSLToken token;
