@@ -2387,7 +2387,9 @@ extern SDL_DECLSPEC SDL_GPUDevice * SDLCALL SDL_CreateGPUDevice(
  * - `SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_INSTANCE_POINTER`: an existing
  *   `WGPUInstance` to use instead of creating one.
  * - `SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_ADAPTER_POINTER`: an existing
- *   `WGPUAdapter` to use instead of requesting one.
+ *   `WGPUAdapter` to use instead of requesting one. Requires
+ *   `SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_INSTANCE_POINTER` as well, since SDL
+ *   waits on the adapter's futures through that instance.
  * - `SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_DEVICE_POINTER`: an existing
  *   `WGPUDevice` to use instead of requesting one. Requires
  *   `SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_ADAPTER_POINTER` as well. This lets a
