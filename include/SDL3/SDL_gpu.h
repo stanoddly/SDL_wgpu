@@ -2384,6 +2384,23 @@ extern SDL_DECLSPEC SDL_GPUDevice * SDLCALL SDL_CreateGPUDevice(
  *   are usecases for when you want to disable caching (if so, set this to 0)
  *   or if you want to disable cache pruning. (if so, set this to -1)
  *   TLDR: Don't touch this if you don't know EXACTLY what it does.
+ * - `SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_INSTANCE_POINTER`: an existing
+ *   `WGPUInstance` to use instead of creating one.
+ * - `SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_ADAPTER_POINTER`: an existing
+ *   `WGPUAdapter` to use instead of requesting one. Requires
+ *   `SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_INSTANCE_POINTER` as well, since SDL
+ *   waits on the adapter's futures through that instance.
+ * - `SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_DEVICE_POINTER`: an existing
+ *   `WGPUDevice` to use instead of requesting one. Requires
+ *   `SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_ADAPTER_POINTER` as well. This lets a
+ *   host that has already obtained a device asynchronously (for example
+ *   JavaScript under Emscripten, importing it with
+ *   `WebGPU.importJsDevice()`) hand it to SDL, so that
+ *   SDL_CreateGPUDeviceWithProperties() never has to wait. SDL takes its own
+ *   reference to each adopted object and releases only that reference in
+ *   SDL_DestroyGPUDevice(); the host keeps ownership. SDL cannot install
+ *   error or device-lost callbacks on an adopted device, so the host must
+ *   observe those itself.
  *
  * \param props the properties to use.
  * \returns a GPU context on success or NULL on failure; call SDL_GetError()
@@ -2423,6 +2440,9 @@ extern SDL_DECLSPEC SDL_GPUDevice * SDLCALL SDL_CreateGPUDeviceWithProperties(
 #define SDL_PROP_GPU_DEVICE_CREATE_METAL_ALLOW_MACFAMILY1_BOOLEAN               "SDL.gpu.device.create.metal.allowmacfamily1"
 
 #define SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_BINDGROUP_EXPIRE_AFTER_N_SUBMITS      "SDL.gpu.device.create.webgpu.bindgroupexpiry"
+#define SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_INSTANCE_POINTER                      "SDL.gpu.device.create.webgpu.instance"
+#define SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_ADAPTER_POINTER                       "SDL.gpu.device.create.webgpu.adapter"
+#define SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_DEVICE_POINTER                        "SDL.gpu.device.create.webgpu.device"
 #define SDL_PROP_GPU_DEVICE_CREATE_XR_ENABLE_BOOLEAN                            "SDL.gpu.device.create.xr.enable"
 #define SDL_PROP_GPU_DEVICE_CREATE_XR_INSTANCE_POINTER                          "SDL.gpu.device.create.xr.instance_out"
 #define SDL_PROP_GPU_DEVICE_CREATE_XR_SYSTEM_ID_POINTER                         "SDL.gpu.device.create.xr.system_id_out"

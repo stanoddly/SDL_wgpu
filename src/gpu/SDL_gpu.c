@@ -1805,6 +1805,16 @@ void SDL_PushGPUComputeUniformData(
 
 // Render Pass
 
+static void SDL_GPU_TrackRenderArea(RenderPass *render_pass, SDL_GPUTexture *texture, Uint32 mip_level)
+{
+    TextureCommonHeader *header = (TextureCommonHeader *)texture;
+    Uint32 width = SDL_max(header->info.width >> mip_level, 1);
+    Uint32 height = SDL_max(header->info.height >> mip_level, 1);
+
+    render_pass->render_area_width = SDL_min(render_pass->render_area_width, width);
+    render_pass->render_area_height = SDL_min(render_pass->render_area_height, height);
+}
+
 SDL_GPURenderPass *SDL_BeginGPURenderPass(
     SDL_GPUCommandBuffer *command_buffer,
     const SDL_GPUColorTargetInfo *color_target_infos,
@@ -1916,12 +1926,16 @@ SDL_GPURenderPass *SDL_BeginGPURenderPass(
 
     if (COMMAND_BUFFER_DEVICE->debug_mode) {
         commandBufferHeader->render_pass.in_progress = true;
+        commandBufferHeader->render_pass.render_area_width = SDL_MAX_UINT32;
+        commandBufferHeader->render_pass.render_area_height = SDL_MAX_UINT32;
         for (Uint32 i = 0; i < num_color_targets; i += 1) {
             commandBufferHeader->render_pass.color_targets[i] = color_target_infos[i].texture;
+            SDL_GPU_TrackRenderArea(&commandBufferHeader->render_pass, color_target_infos[i].texture, color_target_infos[i].mip_level);
         }
         commandBufferHeader->render_pass.num_color_targets = num_color_targets;
         if (depth_stencil_target_info != NULL) {
             commandBufferHeader->render_pass.depth_stencil_target = depth_stencil_target_info->texture;
+            SDL_GPU_TrackRenderArea(&commandBufferHeader->render_pass, depth_stencil_target_info->texture, depth_stencil_target_info->mip_level);
         } else {
             commandBufferHeader->render_pass.depth_stencil_target = NULL;
         }
@@ -1968,6 +1982,16 @@ void SDL_SetGPUViewport(
 
     if (RENDERPASS_DEVICE->debug_mode) {
         CHECK_RENDERPASS
+        RenderPass *pass = (RenderPass *)render_pass;
+        if (viewport->x < 0.0f || viewport->y < 0.0f || viewport->w < 0.0f || viewport->h < 0.0f ||
+            viewport->x + viewport->w > (float)pass->render_area_width || viewport->y + viewport->h > (float)pass->render_area_height) {
+            SDL_assert_release(!"Viewport must lie within the render pass targets!");
+            return;
+        }
+        if (viewport->min_depth < 0.0f || viewport->max_depth > 1.0f || viewport->min_depth > viewport->max_depth) {
+            SDL_assert_release(!"Viewport depth range must satisfy 0 <= min_depth <= max_depth <= 1!");
+            return;
+        }
     }
 
     RENDERPASS_DEVICE->SetViewport(
@@ -1990,6 +2014,12 @@ void SDL_SetGPUScissor(
 
     if (RENDERPASS_DEVICE->debug_mode) {
         CHECK_RENDERPASS
+        RenderPass *pass = (RenderPass *)render_pass;
+        if (scissor->x < 0 || scissor->y < 0 || scissor->w < 0 || scissor->h < 0 ||
+            (Uint32)scissor->x + (Uint32)scissor->w > pass->render_area_width || (Uint32)scissor->y + (Uint32)scissor->h > pass->render_area_height) {
+            SDL_assert_release(!"Scissor must lie within the render pass targets!");
+            return;
+        }
     }
 
     RENDERPASS_DEVICE->SetScissor(
