@@ -2135,7 +2135,12 @@ static WebGPUBindGroupEntryType WEBGPU_INTERNAL_GetEntryTypeFromToken(const char
 }
 
 // FIXME: Commented out lines are still parsed!
-static Uint32 WEBGPU_INTERNAL_ParseBindGroupLayoutEntriesFromShader(const char *shaderSource, WebGPUInferredBindGroupLayoutEntry **storePtr)
+// Texture i sits at binding 2i and its sampler at 2i + 1, so an unfilterable slot addresses two bindings.
+#define WEBGPU_INTERNAL_MAX_UNFILTERABLE_BINDINGS (2 * MAX_TEXTURE_SAMPLERS_PER_STAGE)
+
+// samplerGroup is the WGSL group that holds this stage's sampled textures; unfilterableSamplerSlots is a bitmask of SDL sampler slots
+// whose texture and sampler must be laid out as unfilterable (see SDL_PROP_GPU_SHADER_CREATE_WEBGPU_UNFILTERABLE_SAMPLER_SLOTS_NUMBER).
+static Uint32 WEBGPU_INTERNAL_ParseBindGroupLayoutEntriesFromShader(const char *shaderSource, Uint32 samplerGroup, Uint32 unfilterableSamplerSlots, WebGPUInferredBindGroupLayoutEntry **storePtr)
 {
     WebGPUInferredBindGroupLayoutEntry *entries = NULL;
     Uint32 entryCount = 0;
@@ -2175,7 +2180,13 @@ static Uint32 WEBGPU_INTERNAL_ParseBindGroupLayoutEntriesFromShader(const char *
     char *trimmedEnd = trimmed;
 
     // gross hack
-    bool isBindingLocationUnfilterable[4][MAX_TEXTURE_SAMPLERS_PER_STAGE] = { 0 };
+    bool isBindingLocationUnfilterable[4][WEBGPU_INTERNAL_MAX_UNFILTERABLE_BINDINGS] = { 0 };
+
+    for (Uint32 slot = 0; slot < MAX_TEXTURE_SAMPLERS_PER_STAGE; slot++) {
+        if (unfilterableSamplerSlots & (1u << slot)) {
+            isBindingLocationUnfilterable[samplerGroup][2 * slot] = true;
+        }
+    }
 
     // We'll remove all of the whitespace from shaderSource to make parsing easier
     while (sourceView < sourceEnd) {
@@ -2194,7 +2205,7 @@ static Uint32 WEBGPU_INTERNAL_ParseBindGroupLayoutEntriesFromShader(const char *
             int group = 0;
             int binding = 0;
             if (SDL_sscanf(hackFix, "SDLGPU_ForceAllowSamplingForTexture(%d,%d)", &group, &binding) != 0) {
-                if (group < 4 && binding < 16) {
+                if (group >= 0 && group < 4 && binding >= 0 && binding < WEBGPU_INTERNAL_MAX_UNFILTERABLE_BINDINGS) {
                     isBindingLocationUnfilterable[group][binding] = true;
                 }
             }
@@ -2246,7 +2257,7 @@ static Uint32 WEBGPU_INTERNAL_ParseBindGroupLayoutEntriesFromShader(const char *
             break;
         case WEBGPU_BIND_GROUP_ENTRY_TYPE_SAMPLER:
             // Basic bounds checking, doesn't actually check to see if the binding is in the right group as defined by SDLGPU
-            if (entry.group < 4 && entry.binding < 16) {
+            if (entry.group < 4 && entry.binding < WEBGPU_INTERNAL_MAX_UNFILTERABLE_BINDINGS) {
                 entry.sampler.bindType = (isBindingLocationUnfilterable[entry.group][SDL_max(entry.binding - 1, 0)]) ? WGPUSamplerBindingType_NonFiltering : WEBGPU_INTERNAL_GetSamplerBindTypeFromToken(bind);
             }
             break;
@@ -2255,7 +2266,7 @@ static Uint32 WEBGPU_INTERNAL_ParseBindGroupLayoutEntriesFromShader(const char *
             entry.texture.format = WEBGPU_INTERNAL_GetTextureFormatFromToken(bind);
             entry.texture.isDepth = WEBGPU_INTERNAL_TokenIsDepthTexture(bind);
             entry.texture.isMultisampled = WEBGPU_INTERNAL_TokenIsMultisampledTexture(bind);
-            if (entry.group < 4 && entry.binding < 16) {
+            if (entry.group < 4 && entry.binding < WEBGPU_INTERNAL_MAX_UNFILTERABLE_BINDINGS) {
                 entry.texture.isForciblyUnfilterable = isBindingLocationUnfilterable[entry.group][entry.binding];
             }
             break;
@@ -2297,11 +2308,14 @@ static Uint32 WEBGPU_INTERNAL_ParseBindGroupLayoutEntriesFromShader(const char *
 // The larger issue with this is that we're memory leaking. I'm bad with C strings so I don't know /where/ it's leaking but I do know it is.
 static WebGPUShaderBindGroupLayouts *WEBGPU_INTERNAL_GenerateBindGroupLayoutsForShader(const char *shaderSource,
                                                                                        WebGPURenderer *renderer,
-                                                                                       WGPUShaderStage stage)
+                                                                                       WGPUShaderStage stage,
+                                                                                       Uint32 unfilterableSamplerSlots)
 {
     WebGPUShaderBindGroupLayouts *result = SDL_calloc(1, sizeof(WebGPUShaderBindGroupLayouts));
     WebGPUInferredBindGroupLayoutEntry *entries = NULL;
-    Uint32 numParsedEntries = WEBGPU_INTERNAL_ParseBindGroupLayoutEntriesFromShader(shaderSource, &entries);
+    // Vertex sampled textures live in group 0, fragment ones in group 2.
+    Uint32 samplerGroup = stage == WGPUShaderStage_Vertex ? 0 : 2;
+    Uint32 numParsedEntries = WEBGPU_INTERNAL_ParseBindGroupLayoutEntriesFromShader(shaderSource, samplerGroup, unfilterableSamplerSlots, &entries);
 
     WGPUBindGroupLayoutEntry *samplerEntries = NULL;
     WGPUBindGroupLayoutEntry *uniformEntries = NULL;
@@ -2402,11 +2416,13 @@ static WebGPUShaderBindGroupLayouts *WEBGPU_INTERNAL_GenerateBindGroupLayoutsFor
 }
 
 static WebGPUComputeShaderBindGroupLayouts *WEBGPU_INTERNAL_GenerateBindGroupLayoutsForComputeShader(const char *shaderSource,
-                                                                                                     WebGPURenderer *renderer)
+                                                                                                     WebGPURenderer *renderer,
+                                                                                                     Uint32 unfilterableSamplerSlots)
 {
     WebGPUComputeShaderBindGroupLayouts *result = SDL_calloc(1, sizeof(WebGPUComputeShaderBindGroupLayouts));
     WebGPUInferredBindGroupLayoutEntry *entries = NULL;
-    Uint32 numParsedEntries = WEBGPU_INTERNAL_ParseBindGroupLayoutEntriesFromShader(shaderSource, &entries);
+    // Compute sampled textures live in group 0.
+    Uint32 numParsedEntries = WEBGPU_INTERNAL_ParseBindGroupLayoutEntriesFromShader(shaderSource, 0, unfilterableSamplerSlots, &entries);
 
     WGPUBindGroupLayoutEntry *samplerEntries = NULL;
     WGPUBindGroupLayoutEntry *readWriteEntries = NULL;
@@ -2446,7 +2462,13 @@ static WebGPUComputeShaderBindGroupLayouts *WEBGPU_INTERNAL_GenerateBindGroupLay
             entry.sampler.type = parsedEntry->sampler.bindType;
             break;
         case WEBGPU_BIND_GROUP_ENTRY_TYPE_TEXTURE:
-            entry.texture.sampleType = parsedEntry->texture.isDepth ? WGPUTextureSampleType_Depth : WebGPUTextureFormatToSampleType(parsedEntry->texture.format);
+            if (parsedEntry->texture.isForciblyUnfilterable) {
+                entry.texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
+            } else if (parsedEntry->texture.isDepth) {
+                entry.texture.sampleType = WGPUTextureSampleType_Depth;
+            } else {
+                entry.texture.sampleType = WebGPUTextureFormatToSampleType(parsedEntry->texture.format);
+            }
             entry.texture.viewDimension = parsedEntry->texture.dimension;
             entry.texture.multisampled = parsedEntry->texture.isMultisampled;
             entry.texture.nextInChain = NULL;
@@ -3456,8 +3478,9 @@ static SDL_GPUShader *WEBGPU_CreateShader(
     shader->shader = wgpuDeviceCreateShaderModule(((WebGPURenderer *)driverData)->device, &desc);
 
     shader->entrypoint = SDL_strdup(createinfo->entrypoint);
+    Uint32 unfilterableSamplerSlots = (Uint32)SDL_GetNumberProperty(createinfo->props, SDL_PROP_GPU_SHADER_CREATE_WEBGPU_UNFILTERABLE_SAMPLER_SLOTS_NUMBER, 0);
     shader->bindGroupLayouts = WEBGPU_INTERNAL_GenerateBindGroupLayoutsForShader((char *)createinfo->code, ((WebGPURenderer *)driverData),
-                                                                                 createinfo->stage == SDL_GPU_SHADERSTAGE_VERTEX ? WGPUShaderStage_Vertex : WGPUShaderStage_Fragment);
+                                                                                 createinfo->stage == SDL_GPU_SHADERSTAGE_VERTEX ? WGPUShaderStage_Vertex : WGPUShaderStage_Fragment, unfilterableSamplerSlots);
 
     return (SDL_GPUShader *)shader;
 }
@@ -5067,7 +5090,8 @@ static SDL_GPUComputePipeline *WEBGPU_CreateComputePipeline(SDL_GPURenderer *dev
         return NULL;
     }
 
-    pipeline->bindGroupLayouts = WEBGPU_INTERNAL_GenerateBindGroupLayoutsForComputeShader((char *)createInfo->code, ((WebGPURenderer *)device));
+    Uint32 unfilterableSamplerSlots = (Uint32)SDL_GetNumberProperty(createInfo->props, SDL_PROP_GPU_COMPUTEPIPELINE_CREATE_WEBGPU_UNFILTERABLE_SAMPLER_SLOTS_NUMBER, 0);
+    pipeline->bindGroupLayouts = WEBGPU_INTERNAL_GenerateBindGroupLayoutsForComputeShader((char *)createInfo->code, ((WebGPURenderer *)device), unfilterableSamplerSlots);
 
     if (pipeline->bindGroupLayouts == NULL) {
         SDL_SetError("Failed to generate bind group layouts for compute shader!");
