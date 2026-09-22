@@ -418,46 +418,6 @@ static WGPUAddressMode SDLToWebGPU_AddressMode[] = {
     WGPUAddressMode_ClampToEdge,
 };
 
-static WGPUTextureSampleType WebGPUTextureFormatToSampleType(WGPUTextureFormat format)
-{
-    switch (format) {
-    case WGPUTextureFormat_R8Uint:
-    case WGPUTextureFormat_RG8Uint:
-    case WGPUTextureFormat_RGBA8Uint:
-    case WGPUTextureFormat_R16Uint:
-    case WGPUTextureFormat_RG16Uint:
-    case WGPUTextureFormat_RGBA16Uint:
-    case WGPUTextureFormat_R32Uint:
-    case WGPUTextureFormat_RG32Uint:
-    case WGPUTextureFormat_RGBA32Uint:
-        return WGPUTextureSampleType_Uint;
-
-    case WGPUTextureFormat_R8Sint:
-    case WGPUTextureFormat_RG8Sint:
-    case WGPUTextureFormat_RGBA8Sint:
-    case WGPUTextureFormat_R16Sint:
-    case WGPUTextureFormat_RG16Sint:
-    case WGPUTextureFormat_RGBA16Sint:
-    case WGPUTextureFormat_R32Sint:
-    case WGPUTextureFormat_RG32Sint:
-    case WGPUTextureFormat_RGBA32Sint:
-        return WGPUTextureSampleType_Sint;
-
-    case WGPUTextureFormat_Depth16Unorm:
-    case WGPUTextureFormat_Depth24Plus:
-    case WGPUTextureFormat_Depth32Float:
-        return WGPUTextureSampleType_Depth;
-
-    case WGPUTextureFormat_R32Float:
-    case WGPUTextureFormat_RG32Float:
-    case WGPUTextureFormat_RGBA32Float:
-        return WGPUTextureSampleType_UnfilterableFloat;
-
-    default:
-        return WGPUTextureSampleType_Float;
-    }
-}
-
 static bool WebGPUTextureFormatIsBlendable(WGPUTextureFormat format, bool blendableFloat32FeatureEnabled)
 {
     // TODO: I couldn't find a list of which formats support blending so we'll just add them when we find them
@@ -542,36 +502,7 @@ static char *WGSLTextureViewDimensionIdentifiers[17] = {
     "texture_depth_cube",
 };
 
-static char *WGSLTextureIdentifiers[13] = {
-    "texture_1d",
-    "texture_2d_array",
-    "texture_2d",
-    "texture_3d",
-    "texture_cube_array",
-    "texture_cube",
-    "texture_multisampled_2d",
-    "texture_depth_multisampled_2d",
-    "texture_external",
-    "texture_depth_2d_array",
-    "texture_depth_2d",
-    "texture_depth_cube_array",
-    "texture_depth_cube",
-};
-
-static char *WGSLStorageTextureIdentifiers[4] = {
-    "texture_storage_1d",
-    "texture_storage_2d_array",
-    "texture_storage_2d",
-    "texture_storage_3d",
-};
-
-static char *WGSLStorageTextureAccessIdentifiers[3] = {
-    "read_write",
-    "write",
-    "read",
-};
-
-static WGPUTextureFormat WGSLTextureFormatIdentifiersIndexThingamabob[43] = {
+static WGPUTextureFormat WGSLTextureFormats[43] = {
     WGPUTextureFormat_Undefined,
     WGPUTextureFormat_Undefined,
     WGPUTextureFormat_Undefined,
@@ -617,7 +548,7 @@ static WGPUTextureFormat WGSLTextureFormatIdentifiersIndexThingamabob[43] = {
     WGPUTextureFormat_RG11B10Ufloat,
 };
 
-static WGPUTextureViewDimension WGSLTextureViewDimensionIdentifiersIndexIHateNamingVariables[17] = {
+static WGPUTextureViewDimension WGSLTextureViewDimensions[17] = {
     WGPUTextureViewDimension_1D,
     WGPUTextureViewDimension_2DArray,
     WGPUTextureViewDimension_2D,
@@ -635,12 +566,6 @@ static WGPUTextureViewDimension WGSLTextureViewDimensionIdentifiersIndexIHateNam
     WGPUTextureViewDimension_2D,
     WGPUTextureViewDimension_CubeArray,
     WGPUTextureViewDimension_Cube,
-};
-
-static WGPUStorageTextureAccess WGSLStorageTextureAccessIdentifiersIndexWowISuckAtNamingThings[3] = {
-    WGPUStorageTextureAccess_ReadWrite,
-    WGPUStorageTextureAccess_WriteOnly,
-    WGPUStorageTextureAccess_ReadOnly,
 };
 
 // Bltting shaders kindly borrowed (stolen) from klukaszek's SDLGPU WebGPU implementation.
@@ -870,7 +795,8 @@ typedef struct WebGPURenderer
     bool debugMode;
     bool destroyingSelf;
     bool preferLowPower;
-    bool shouldRecreateLostDevice;
+    SDL_AtomicInt deviceLost;
+    bool ownsDevice;
 } WebGPURenderer;
 
 struct WebGPUWindowData
@@ -972,12 +898,9 @@ typedef struct WebGPUInferredBindGroupLayoutEntry
 
         struct texture
         {
-            WGPUTextureFormat format;
+            WGPUTextureSampleType sampleType;
             WGPUTextureViewDimension dimension;
-
-            bool isDepth;                // Is the texture a depth type? (E.g: texture_depth_2d)
-            bool isMultisampled;         // Is the texture a multisampled type? (E.g: texture_multisampled_2d)
-            bool isForciblyUnfilterable; // Is this texture unfilterable?
+            bool isMultisampled;
         } texture;
 
         struct storageTexture
@@ -1375,11 +1298,10 @@ typedef struct WebGPUCommandBuffer
     Uint32 swapchainTextureCapacity;
     WebGPUTextureContainer **acquiredSwapchainTextures;
 
-    // These are used to ensure that the end-user doesn't use a scissor
-    // that's larger than the smallest color target's, since WebGPU disallows
-    // that and will die a horrible, painful death from even considering it
-    Uint32 smallestColorTargetW;
-    Uint32 smallestColorTargetH;
+    // Smallest attachment extent of the current render pass at its bound mip level.
+    // WebGPU rejects viewports and scissors that reach outside it, so they are clamped to it.
+    Uint32 renderAreaW;
+    Uint32 renderAreaH;
 } WebGPUCommandBuffer;
 
 static void
@@ -1393,10 +1315,10 @@ WEBGPU_INTERNAL_FenceCallback(WGPUQueueWorkDoneStatus status, WGPUStringView mes
 static void
 WEBGPU_INTERNAL_UncapturedErrorCallback(WGPUDevice const *device, WGPUErrorType type, WGPUStringView message, void *renderer, void *unused)
 {
-    SDL_LogError(SDL_LOG_CATEGORY_GPU, "WebGPU uncaptured error!\n%s", message.data);
+    SDL_LogError(SDL_LOG_CATEGORY_GPU, "WebGPU uncaptured error (type %d): %.*s", (int)type, (int)message.length, message.data);
 
     if (((WebGPURenderer *)renderer)->debugMode) {
-        SDL_assert_release(!"Uncaptured WebGPU error! SDL won't let me format this message though so check the console or smth");
+        SDL_assert_release(!"Uncaptured WebGPU error, see the log for the message");
     }
 }
 
@@ -1412,38 +1334,14 @@ static SDL_PropertiesID WEBGPU_GetDeviceProperties(
     return renderer->props;
 }
 
-// forward decl
-static void WEBGPU_INTERNAL_RequestDevice(WebGPURenderer *renderer, bool *success);
-
+// Every resource belongs to the lost device, so there is nothing useful to recreate here.
+// This callback may run inside a WebGPU callback on the browser main thread, so it must not wait on anything.
 static void WEBGPU_INTERNAL_DeviceLostCallback(WGPUDevice const *device, WGPUDeviceLostReason reason, WGPUStringView message, void *renderer, void *unused)
 {
-    bool debugMode = ((WebGPURenderer *)renderer)->debugMode;
+    SDL_SetAtomicInt(&((WebGPURenderer *)renderer)->deviceLost, 1);
 
-    if (debugMode) {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Device has been lost.");
-    }
-
-    if (((WebGPURenderer *)renderer)->shouldRecreateLostDevice && !((WebGPURenderer *)renderer)->destroyingSelf) {
-        // Since the device has been lost, there might be some larger issues within WebGPU.
-        // We'll double check that everything's in order.
-
-        if (((WebGPURenderer *)renderer)->instance == NULL) {
-            SDL_LogError(SDL_LOG_CATEGORY_GPU, "WebGPU instance has been lost. It's so joever.");
-            return;
-        }
-
-        if (((WebGPURenderer *)renderer)->adapter == NULL) {
-            // TODO: We should just recreate the adapter if it's lost.
-            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Adapter is lost. It's so joever");
-        }
-
-        if (debugMode) {
-            SDL_LogDebug(SDL_LOG_CATEGORY_GPU, "Attempting to recreate WebGPU device.");
-        }
-
-        WEBGPU_INTERNAL_RequestDevice(renderer, NULL);
-    } else {
-        return;
+    if (reason != WGPUDeviceLostReason_Destroyed || !((WebGPURenderer *)renderer)->destroyingSelf) {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "WebGPU device has been lost (reason %d): %.*s", (int)reason, (int)message.length, message.data);
     }
 }
 
@@ -1522,8 +1420,10 @@ WEBGPU_INTERNAL_RequestDeviceCallback(WGPURequestDeviceStatus status, WGPUDevice
 
 static inline void WEBGPU_INTERNAL_RegisterQueuedDestroy(WebGPURenderer *renderer, WebGPUQueuedDestroy *destroy)
 {
+    SDL_LockMutex(renderer->registeringQueuedDestroyLock);
     WEBGPU_INTERNAL_InsertElementIntoArray(renderer->queuedDestroys, renderer->queuedDestroyCapacity,
                                            renderer->queuedDestroyCount, WebGPUQueuedDestroy *, destroy);
+    SDL_UnlockMutex(renderer->registeringQueuedDestroyLock);
 }
 
 static void WEBGPU_INTERNAL_QueueTextureContainerForRelease(WebGPURenderer *renderer, WebGPUTextureContainer *container)
@@ -1663,6 +1563,20 @@ static void WEBGPU_INTERNAL_RequestAdapter(WebGPURenderer *renderer, bool *succe
     }
 }
 
+static bool WEBGPU_INTERNAL_DeviceHasRequiredFeatures(WGPUDevice device)
+{
+    bool result = true;
+
+    for (int i = 0; i < SDL_arraysize(WEBGPU_INTERNAL_RequiredFeatures); i++) {
+        if (!wgpuDeviceHasFeature(device, WEBGPU_INTERNAL_RequiredFeatures[i])) {
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "WebGPU device does not have required feature \"%s\"!", WEBGPU_FeatureNameToString(WEBGPU_INTERNAL_RequiredFeatures[i]));
+            result = false;
+        }
+    }
+
+    return result;
+}
+
 static void WEBGPU_INTERNAL_RequestDevice(WebGPURenderer *renderer, bool *success)
 {
     WGPUDeviceDescriptor deviceDesc = WGPU_DEVICE_DESCRIPTOR_INIT;
@@ -1788,6 +1702,12 @@ static SDL_GPUCommandBuffer *WEBGPU_AcquireCommandBuffer(SDL_GPURenderer *device
     // which is the exact opposite of what a command buffer is in SDL_GPU.
     // So, I had to do this gross hack. God, please forgive me.
     WebGPUCommandBuffer *wrapper;
+
+    if (SDL_GetAtomicInt(&((WebGPURenderer *)device)->deviceLost)) {
+        SDL_SetError("WebGPU device has been lost");
+        return NULL;
+    }
+
     wrapper = (WebGPUCommandBuffer *)SDL_calloc(1, sizeof(*wrapper));
 
     wrapper->renderer = (WebGPURenderer *)device;
@@ -1986,336 +1906,427 @@ static bool WEBGPU_Wait(SDL_GPURenderer *driverData)
     return WEBGPU_WaitForFences(driverData, true, (SDL_GPUFence **)&((WebGPURenderer *)driverData)->queueDoneFence, 1);
 }
 
-static inline size_t WEBGPU_INTERNAL_GetTokenBindGroup(const char *token)
+// -- WGSL resource declaration parser --
+//
+// The backend infers each shader's bind group layout from the resource declarations in
+// the WGSL source, since SDL_GPU's shader create info only carries resource counts.
+// Only "@group(G) @binding(B) var<...> name : type" declarations at module scope
+// matter; everything else is skipped token by token. Attributes may appear in any
+// order and comments are ignored.
+
+// Texture i sits at binding 2i and its sampler at 2i + 1, so directives address twice the sampler slot count.
+#define WEBGPU_INTERNAL_WGSL_MAX_DIRECTIVE_BINDINGS (2 * MAX_TEXTURE_SAMPLERS_PER_STAGE)
+
+#define WEBGPU_INTERNAL_WGSL_ATTRIBUTE_ABSENT      (-1)
+#define WEBGPU_INTERNAL_WGSL_ATTRIBUTE_NOT_LITERAL (-2)
+
+typedef struct WGSLToken
 {
-    char *search = SDL_strstr(token, "@group(");
+    const char *begin;
+    size_t length;
+} WGSLToken;
 
-    if (search != NULL) {
-        int group;
+typedef struct WGSLTokenizer
+{
+    const char *cursor;
+    const char *end;
+} WGSLTokenizer;
 
-        if (SDL_sscanf(search, "@group(%d)", &group)) {
-            return group;
+static bool WEBGPU_INTERNAL_WGSL_TokenEquals(const WGSLToken *token, const char *text)
+{
+    size_t length = SDL_strlen(text);
+    return token->length == length && SDL_memcmp(token->begin, text, length) == 0;
+}
+
+static bool WEBGPU_INTERNAL_WGSL_TokenStartsWith(const WGSLToken *token, const char *prefix)
+{
+    size_t length = SDL_strlen(prefix);
+    return token->length >= length && SDL_memcmp(token->begin, prefix, length) == 0;
+}
+
+static bool WEBGPU_INTERNAL_WGSL_TokenIsChar(const WGSLToken *token, char c)
+{
+    return token->length == 1 && token->begin[0] == c;
+}
+
+// Skips whitespace and comments. Block comments nest in WGSL.
+static void WEBGPU_INTERNAL_WGSL_SkipTrivia(WGSLTokenizer *tokenizer)
+{
+    while (tokenizer->cursor < tokenizer->end) {
+        bool hasNext = tokenizer->cursor + 1 < tokenizer->end;
+
+        if (SDL_isspace((unsigned char)*tokenizer->cursor)) {
+            tokenizer->cursor++;
+        } else if (hasNext && tokenizer->cursor[0] == '/' && tokenizer->cursor[1] == '/') {
+            while (tokenizer->cursor < tokenizer->end && *tokenizer->cursor != '\n' && *tokenizer->cursor != '\r') {
+                tokenizer->cursor++;
+            }
+        } else if (hasNext && tokenizer->cursor[0] == '/' && tokenizer->cursor[1] == '*') {
+            int depth = 1;
+            tokenizer->cursor += 2;
+            while (tokenizer->cursor < tokenizer->end && depth > 0) {
+                if (tokenizer->cursor + 1 < tokenizer->end && tokenizer->cursor[0] == '/' && tokenizer->cursor[1] == '*') {
+                    depth++;
+                    tokenizer->cursor += 2;
+                } else if (tokenizer->cursor + 1 < tokenizer->end && tokenizer->cursor[0] == '*' && tokenizer->cursor[1] == '/') {
+                    depth--;
+                    tokenizer->cursor += 2;
+                } else {
+                    tokenizer->cursor++;
+                }
+            }
+        } else {
+            return;
+        }
+    }
+}
+
+// Identifiers and numeric literals are one token each, any other character is its own token.
+static bool WEBGPU_INTERNAL_WGSL_NextToken(WGSLTokenizer *tokenizer, WGSLToken *token)
+{
+    WEBGPU_INTERNAL_WGSL_SkipTrivia(tokenizer);
+
+    if (tokenizer->cursor >= tokenizer->end) {
+        token->begin = tokenizer->end;
+        token->length = 0;
+        return false;
+    }
+
+    unsigned char c = (unsigned char)*tokenizer->cursor;
+    token->begin = tokenizer->cursor;
+
+    if (SDL_isalpha(c) || c == '_') {
+        while (tokenizer->cursor < tokenizer->end && (SDL_isalnum((unsigned char)*tokenizer->cursor) || *tokenizer->cursor == '_')) {
+            tokenizer->cursor++;
+        }
+    } else if (SDL_isdigit(c)) {
+        while (tokenizer->cursor < tokenizer->end && (SDL_isalnum((unsigned char)*tokenizer->cursor) || *tokenizer->cursor == '.')) {
+            tokenizer->cursor++;
+        }
+    } else {
+        tokenizer->cursor++;
+    }
+
+    token->length = tokenizer->cursor - token->begin;
+    return true;
+}
+
+static bool WEBGPU_INTERNAL_WGSL_PeekToken(WGSLTokenizer *tokenizer, WGSLToken *token)
+{
+    WGSLTokenizer saved = *tokenizer;
+    bool result = WEBGPU_INTERNAL_WGSL_NextToken(tokenizer, token);
+    *tokenizer = saved;
+    return result;
+}
+
+static bool WEBGPU_INTERNAL_WGSL_AcceptChar(WGSLTokenizer *tokenizer, char c)
+{
+    WGSLToken token;
+    if (WEBGPU_INTERNAL_WGSL_PeekToken(tokenizer, &token) && WEBGPU_INTERNAL_WGSL_TokenIsChar(&token, c)) {
+        WEBGPU_INTERNAL_WGSL_NextToken(tokenizer, &token);
+        return true;
+    }
+    return false;
+}
+
+// Consumes tokens up to and including the bracket that closes the one just consumed.
+static void WEBGPU_INTERNAL_WGSL_SkipBalanced(WGSLTokenizer *tokenizer, char open, char close)
+{
+    WGSLToken token;
+    int depth = 1;
+
+    while (depth > 0 && WEBGPU_INTERNAL_WGSL_NextToken(tokenizer, &token)) {
+        if (WEBGPU_INTERNAL_WGSL_TokenIsChar(&token, open)) {
+            depth++;
+        } else if (WEBGPU_INTERNAL_WGSL_TokenIsChar(&token, close)) {
+            depth--;
+        }
+    }
+}
+
+static int WEBGPU_INTERNAL_WGSL_TokenToInt(const WGSLToken *token)
+{
+    char buffer[32];
+    size_t length = SDL_min(token->length, sizeof(buffer) - 1);
+    SDL_memcpy(buffer, token->begin, length);
+    buffer[length] = '\0';
+    return (int)SDL_strtol(buffer, NULL, 0);
+}
+
+// Parses "(N)" after "@group" or "@binding". Returns the index, or WEBGPU_INTERNAL_WGSL_ATTRIBUTE_NOT_LITERAL when the argument is not an integer literal.
+static int WEBGPU_INTERNAL_WGSL_ParseAttributeIndex(WGSLTokenizer *tokenizer)
+{
+    WGSLToken token;
+    int value = WEBGPU_INTERNAL_WGSL_ATTRIBUTE_NOT_LITERAL;
+
+    if (!WEBGPU_INTERNAL_WGSL_AcceptChar(tokenizer, '(')) {
+        return WEBGPU_INTERNAL_WGSL_ATTRIBUTE_NOT_LITERAL;
+    }
+
+    if (WEBGPU_INTERNAL_WGSL_NextToken(tokenizer, &token) && SDL_isdigit((unsigned char)token.begin[0])) {
+        value = WEBGPU_INTERNAL_WGSL_TokenToInt(&token);
+    }
+
+    WEBGPU_INTERNAL_WGSL_SkipBalanced(tokenizer, '(', ')');
+    return value;
+}
+
+// Collects the identifiers directly inside one "<...>" list, e.g. "storage, read_write" or "rgba8unorm, write".
+// Nested template lists such as array<vec4<f32>> contribute only their outer identifier.
+static Uint32 WEBGPU_INTERNAL_WGSL_ParseTemplateList(WGSLTokenizer *tokenizer, WGSLToken *arguments, Uint32 maxArguments)
+{
+    WGSLToken token;
+    Uint32 count = 0;
+    int depth = 1;
+
+    while (depth > 0 && WEBGPU_INTERNAL_WGSL_NextToken(tokenizer, &token)) {
+        if (WEBGPU_INTERNAL_WGSL_TokenIsChar(&token, '<')) {
+            depth++;
+        } else if (WEBGPU_INTERNAL_WGSL_TokenIsChar(&token, '>')) {
+            depth--;
+        } else if (depth == 1 && count < maxArguments && (SDL_isalpha((unsigned char)token.begin[0]) || token.begin[0] == '_')) {
+            arguments[count++] = token;
         }
     }
 
-    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Could not parse bind group from token.\nToken: '%s'", token);
-    return -1;
+    return count;
 }
 
-static inline int WEBGPU_INTERNAL_GetTokenBindLocation(const char *token)
+static WGPUTextureViewDimension WEBGPU_INTERNAL_WGSL_TextureTypeToViewDimension(const WGSLToken *typeName)
 {
-    char *search = SDL_strstr(token, "@binding(");
-
-    if (search != NULL) {
-        int binding;
-
-        if (SDL_sscanf(search, "@binding(%d)", &binding)) {
-            return binding;
+    for (size_t i = 0; i < SDL_arraysize(WGSLTextureViewDimensionIdentifiers); i++) {
+        if (WEBGPU_INTERNAL_WGSL_TokenEquals(typeName, WGSLTextureViewDimensionIdentifiers[i])) {
+            return WGSLTextureViewDimensions[i];
         }
     }
-
-    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Could not parse bind location from token.\nToken: '%s'", token);
-    return -1;
-}
-
-static inline WGPUTextureViewDimension WEBGPU_INTERNAL_GetTextureViewDimensionFromToken(const char *token)
-{
-    for (size_t i = 0; i < 17; i++) {
-        if (SDL_strstr(token, WGSLTextureViewDimensionIdentifiers[i])) {
-            return WGSLTextureViewDimensionIdentifiersIndexIHateNamingVariables[i];
-        };
-    }
-
-    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Could not parse texture view dimension from token.\nToken: '%s'", token);
     return WGPUTextureViewDimension_Undefined;
 }
 
-static inline WGPUStorageTextureAccess WEBGPU_INTERNAL_GetStorageTextureAccessFromToken(const char *token)
+static WGPUTextureFormat WEBGPU_INTERNAL_WGSL_TexelFormatToTextureFormat(const WGSLToken *format)
 {
-    // TODO: Check for incompatibilities
-    for (size_t i = 0; i < 3; i++) {
-        if (SDL_strstr(token, WGSLStorageTextureAccessIdentifiers[i])) {
-            return WGSLStorageTextureAccessIdentifiersIndexWowISuckAtNamingThings[i];
+    for (size_t i = 0; i < SDL_arraysize(WGSLTextureFormatIdentifiers); i++) {
+        if (WEBGPU_INTERNAL_WGSL_TokenEquals(format, WGSLTextureFormatIdentifiers[i])) {
+            return WGSLTextureFormats[i];
         }
     }
+    return WGPUTextureFormat_Undefined;
+}
 
-    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Could not parse storage texture access type from token.\nToken: '%s'", token);
+static WGPUStorageTextureAccess WEBGPU_INTERNAL_WGSL_AccessModeToStorageTextureAccess(const WGSLToken *access)
+{
+    if (WEBGPU_INTERNAL_WGSL_TokenEquals(access, "read_write")) {
+        return WGPUStorageTextureAccess_ReadWrite;
+    } else if (WEBGPU_INTERNAL_WGSL_TokenEquals(access, "read")) {
+        return WGPUStorageTextureAccess_ReadOnly;
+    } else if (WEBGPU_INTERNAL_WGSL_TokenEquals(access, "write")) {
+        return WGPUStorageTextureAccess_WriteOnly;
+    }
     return WGPUStorageTextureAccess_Undefined;
 }
 
-static inline WGPUTextureFormat WEBGPU_INTERNAL_GetTextureFormatFromToken(const char *token)
+static WGPUTextureSampleType WEBGPU_INTERNAL_WGSL_SampledTypeToSampleType(const WGSLToken *sampledType)
 {
-    for (size_t i = 0; i < SDL_arraysize(WGSLTextureFormatIdentifiers); i++) {
-        if (SDL_strstr(token, WGSLTextureFormatIdentifiers[i])) {
-            // TODO: Check if format has invalid usages?
-            return WGSLTextureFormatIdentifiersIndexThingamabob[i];
+    if (WEBGPU_INTERNAL_WGSL_TokenEquals(sampledType, "u32")) {
+        return WGPUTextureSampleType_Uint;
+    } else if (WEBGPU_INTERNAL_WGSL_TokenEquals(sampledType, "i32")) {
+        return WGPUTextureSampleType_Sint;
+    }
+    return WGPUTextureSampleType_Float;
+}
+
+// Finds every "SDLGPU_ForceAllowSamplingForTexture(group, binding)" directive, which marks a
+// float texture as unfilterable so a depth texture declared as texture_2d<f32> can still be
+// sampled. The directive normally lives in a comment next to the declaration.
+static void WEBGPU_INTERNAL_WGSL_CollectUnfilterableTextureDirectives(const char *source, size_t sourceLength, bool unfilterable[4][WEBGPU_INTERNAL_WGSL_MAX_DIRECTIVE_BINDINGS])
+{
+    static const char directive[] = "SDLGPU_ForceAllowSamplingForTexture";
+    const size_t directiveLength = sizeof(directive) - 1;
+    const char *cursor = source;
+    const char *end = source + sourceLength;
+
+    while (cursor + directiveLength <= end) {
+        if (SDL_memcmp(cursor, directive, directiveLength) == 0) {
+            WGSLTokenizer tokenizer = { cursor + directiveLength, end };
+            WGSLToken group;
+            WGSLToken binding;
+
+            if (WEBGPU_INTERNAL_WGSL_AcceptChar(&tokenizer, '(') && WEBGPU_INTERNAL_WGSL_NextToken(&tokenizer, &group) && WEBGPU_INTERNAL_WGSL_AcceptChar(&tokenizer, ',') && WEBGPU_INTERNAL_WGSL_NextToken(&tokenizer, &binding) &&
+                SDL_isdigit((unsigned char)group.begin[0]) && SDL_isdigit((unsigned char)binding.begin[0])) {
+                int groupIndex = WEBGPU_INTERNAL_WGSL_TokenToInt(&group);
+                int bindingIndex = WEBGPU_INTERNAL_WGSL_TokenToInt(&binding);
+                if (groupIndex >= 0 && groupIndex < 4 && bindingIndex >= 0 && bindingIndex < WEBGPU_INTERNAL_WGSL_MAX_DIRECTIVE_BINDINGS) {
+                    unfilterable[groupIndex][bindingIndex] = true;
+                } else {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_GPU, "SDLGPU_ForceAllowSamplingForTexture(%d, %d) is out of range and ignored", groupIndex, bindingIndex);
+                }
+            } else {
+                SDL_LogWarn(SDL_LOG_CATEGORY_GPU, "SDLGPU_ForceAllowSamplingForTexture needs two integer literal arguments; directive ignored");
+            }
+
+            cursor = tokenizer.cursor;
+        } else {
+            cursor++;
         }
     }
-
-    return WGPUTextureFormat_Undefined;
 }
-static inline WGPUSamplerBindingType WEBGPU_INTERNAL_GetSamplerBindTypeFromToken(const char *token)
+
+// Parses what follows "var" in a resource declaration and fills in the entry. Returns false for
+// declarations that do not bind a resource SDL_GPU manages (uniform buffers, workgroup and private variables).
+static bool WEBGPU_INTERNAL_WGSL_ParseResourceDeclaration(WGSLTokenizer *tokenizer, bool unfilterable[4][WEBGPU_INTERNAL_WGSL_MAX_DIRECTIVE_BINDINGS], WebGPUInferredBindGroupLayoutEntry *entry)
 {
-    // really jank but who cares
-    if (SDL_strstr(token, "sampler_comparison")) {
-        return WGPUSamplerBindingType_Comparison;
-    } else {
-        return WGPUSamplerBindingType_Filtering;
+    WGSLToken addressSpace[2] = { 0 };
+    WGSLToken typeArguments[2] = { 0 };
+    WGSLToken typeName;
+    WGSLToken token;
+    Uint32 addressSpaceCount = 0;
+    Uint32 typeArgumentCount = 0;
+    bool inGroupBounds = entry->group < 4 && entry->binding < WEBGPU_INTERNAL_WGSL_MAX_DIRECTIVE_BINDINGS;
+
+    if (WEBGPU_INTERNAL_WGSL_AcceptChar(tokenizer, '<')) {
+        addressSpaceCount = WEBGPU_INTERNAL_WGSL_ParseTemplateList(tokenizer, addressSpace, SDL_arraysize(addressSpace));
     }
-}
 
-static inline bool WEBGPU_INTERNAL_TokenIsDepthTexture(const char *token)
-{
-    const char *depthTextureIdentifiers[5] = {
-        "texture_depth_2d_array",
-        "texture_depth_2d",
-        "texture_depth_cube_array",
-        "texture_depth_cube",
-        "texture_depth_multisampled_2d",
-    };
+    // name
+    if (!WEBGPU_INTERNAL_WGSL_NextToken(tokenizer, &token)) {
+        return false;
+    }
 
-    for (int i = 0; i < 5; i++) {
-        if (SDL_strstr(token, depthTextureIdentifiers[i])) {
+    if (!WEBGPU_INTERNAL_WGSL_AcceptChar(tokenizer, ':')) {
+        return false;
+    }
+
+    if (!WEBGPU_INTERNAL_WGSL_NextToken(tokenizer, &typeName)) {
+        return false;
+    }
+
+    if (WEBGPU_INTERNAL_WGSL_AcceptChar(tokenizer, '<')) {
+        typeArgumentCount = WEBGPU_INTERNAL_WGSL_ParseTemplateList(tokenizer, typeArguments, SDL_arraysize(typeArguments));
+    }
+
+    if (addressSpaceCount > 0) {
+        if (WEBGPU_INTERNAL_WGSL_TokenEquals(&addressSpace[0], "storage")) {
+            entry->type = WEBGPU_BIND_GROUP_ENTRY_TYPE_STORAGE_BUFFER;
+            entry->storageBuffer.canRead = true;
+            entry->storageBuffer.canWrite = addressSpaceCount > 1 && WEBGPU_INTERNAL_WGSL_TokenEquals(&addressSpace[1], "read_write");
             return true;
         }
+        // uniform, workgroup, private, ...
+        return false;
     }
 
+    if (WEBGPU_INTERNAL_WGSL_TokenEquals(&typeName, "sampler")) {
+        entry->type = WEBGPU_BIND_GROUP_ENTRY_TYPE_SAMPLER;
+        // The directive names the texture, which sits in the slot right before its sampler.
+        bool pairedTextureUnfilterable = inGroupBounds && entry->binding > 0 && unfilterable[entry->group][entry->binding - 1];
+        entry->sampler.bindType = pairedTextureUnfilterable ? WGPUSamplerBindingType_NonFiltering : WGPUSamplerBindingType_Filtering;
+        return true;
+    }
+
+    if (WEBGPU_INTERNAL_WGSL_TokenEquals(&typeName, "sampler_comparison")) {
+        entry->type = WEBGPU_BIND_GROUP_ENTRY_TYPE_SAMPLER;
+        entry->sampler.bindType = WGPUSamplerBindingType_Comparison;
+        return true;
+    }
+
+    if (WEBGPU_INTERNAL_WGSL_TokenStartsWith(&typeName, "texture_storage_")) {
+        entry->type = WEBGPU_BIND_GROUP_ENTRY_TYPE_STORAGE_TEXTURE;
+        entry->storageTexture.dimension = WEBGPU_INTERNAL_WGSL_TextureTypeToViewDimension(&typeName);
+        entry->storageTexture.format = typeArgumentCount > 0 ? WEBGPU_INTERNAL_WGSL_TexelFormatToTextureFormat(&typeArguments[0]) : WGPUTextureFormat_Undefined;
+        entry->storageTexture.access = typeArgumentCount > 1 ? WEBGPU_INTERNAL_WGSL_AccessModeToStorageTextureAccess(&typeArguments[1]) : WGPUStorageTextureAccess_Undefined;
+        return true;
+    }
+
+    if (WEBGPU_INTERNAL_WGSL_TokenStartsWith(&typeName, "texture_depth_")) {
+        entry->type = WEBGPU_BIND_GROUP_ENTRY_TYPE_TEXTURE;
+        entry->texture.dimension = WEBGPU_INTERNAL_WGSL_TextureTypeToViewDimension(&typeName);
+        entry->texture.sampleType = WGPUTextureSampleType_Depth;
+        entry->texture.isMultisampled = WEBGPU_INTERNAL_WGSL_TokenEquals(&typeName, "texture_depth_multisampled_2d");
+        return true;
+    }
+
+    if (WEBGPU_INTERNAL_WGSL_TokenStartsWith(&typeName, "texture_")) {
+        entry->type = WEBGPU_BIND_GROUP_ENTRY_TYPE_TEXTURE;
+        entry->texture.dimension = WEBGPU_INTERNAL_WGSL_TextureTypeToViewDimension(&typeName);
+        entry->texture.isMultisampled = WEBGPU_INTERNAL_WGSL_TokenEquals(&typeName, "texture_multisampled_2d");
+        // WebGPU forbids the filterable float sample type on multisampled bindings.
+        if (entry->texture.isMultisampled && (typeArgumentCount == 0 || WEBGPU_INTERNAL_WGSL_TokenEquals(&typeArguments[0], "f32"))) {
+            entry->texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
+        } else if (inGroupBounds && unfilterable[entry->group][entry->binding]) {
+            entry->texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
+        } else {
+            entry->texture.sampleType = typeArgumentCount > 0 ? WEBGPU_INTERNAL_WGSL_SampledTypeToSampleType(&typeArguments[0]) : WGPUTextureSampleType_Float;
+        }
+        return true;
+    }
+
+    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Unrecognised resource type '%.*s' at @group(%u) @binding(%u); binding skipped", (int)typeName.length, typeName.begin, entry->group, entry->binding);
     return false;
 }
-
-static inline bool WEBGPU_INTERNAL_TokenIsMultisampledTexture(const char *token)
-{
-    const char *multisampledTextureIdentifiers[2] = {
-        "texture_multisampled_2d",
-        "texture_depth_multisampled_2d",
-    };
-
-    for (int i = 0; i < 2; i++) {
-        if (SDL_strstr(token, multisampledTextureIdentifiers[i])) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-static WebGPUBindGroupEntryType WEBGPU_INTERNAL_GetEntryTypeFromToken(const char *token)
-{
-    if (!token) {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Attempting to get entry type of NULL token!");
-        return WEBGPU_BIND_GROUP_ENTRY_TYPE_UNKNOWN;
-    }
-
-    if (SDL_strstr(token, "sampler")) {
-        return WEBGPU_BIND_GROUP_ENTRY_TYPE_SAMPLER;
-    }
-
-    // not a sampler, let's check texture
-    for (int i = 0; i < SDL_arraysize(WGSLTextureIdentifiers); i++) {
-        if (SDL_strstr(token, WGSLTextureIdentifiers[i])) {
-            return WEBGPU_BIND_GROUP_ENTRY_TYPE_TEXTURE;
-        }
-    }
-
-    // not a sampled texture, let's check storage texture
-    for (int i = 0; i < SDL_arraysize(WGSLStorageTextureIdentifiers); i++) {
-        if (SDL_strstr(token, WGSLStorageTextureIdentifiers[i])) {
-            return WEBGPU_BIND_GROUP_ENTRY_TYPE_STORAGE_TEXTURE;
-        }
-    }
-
-    // not a storage texture, we'll check if it has "storage" in it, and if so, we'll presume it's a storage buffer.
-    // kinda garbage way of doing it, but it should work 🤞
-    if (SDL_strstr(token, "var<storage")) {
-        return WEBGPU_BIND_GROUP_ENTRY_TYPE_STORAGE_BUFFER;
-    }
-
-    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Could not figure out entry type for token!\nToken: %s\n", token);
-    return WEBGPU_BIND_GROUP_ENTRY_TYPE_UNKNOWN;
-}
-
-// FIXME: Commented out lines are still parsed!
-// Texture i sits at binding 2i and its sampler at 2i + 1, so an unfilterable slot addresses two bindings.
-#define WEBGPU_INTERNAL_MAX_UNFILTERABLE_BINDINGS (2 * MAX_TEXTURE_SAMPLERS_PER_STAGE)
 
 // samplerGroup is the WGSL group that holds this stage's sampled textures; unfilterableSamplerSlots is a bitmask of SDL sampler slots
 // whose texture and sampler must be laid out as unfilterable (see SDL_PROP_GPU_SHADER_CREATE_WEBGPU_UNFILTERABLE_SAMPLER_SLOTS_NUMBER).
-static Uint32 WEBGPU_INTERNAL_ParseBindGroupLayoutEntriesFromShader(const char *shaderSource, Uint32 samplerGroup, Uint32 unfilterableSamplerSlots, WebGPUInferredBindGroupLayoutEntry **storePtr)
+static Uint32 WEBGPU_INTERNAL_ParseBindGroupLayoutEntriesFromShader(const char *shaderSource, size_t shaderSourceLength, Uint32 samplerGroup, Uint32 unfilterableSamplerSlots, WebGPUInferredBindGroupLayoutEntry **storePtr)
 {
     WebGPUInferredBindGroupLayoutEntry *entries = NULL;
     Uint32 entryCount = 0;
     Uint32 entryCapacity = 0;
 
-    // These are the key words that are used to define a binding.
-    // It searches sequentially, where it first finds "@group", then "@binding", then "var"
-    // This is pretty much a poor man's regex, since SDL doesn't have any support for regular expressions, and I won't be the one to add it.
-    // Regexes are overrated anyways, who needs reliability? - TheStickmahn, The Art Of C
-    const char *keywords[3] = { "@group", "@binding", "var" };
-
-    // HACK: Alright, if you want to sample a texture, but that texture doesn't support sampling (e.g, it's a depth texture), you can use
-    // SDLGPU_ForceAllowSamplingForTexture(group, binding). That forces that binding to use WGPUTextureSampleType_UnfilterableFloat.
-    // Now, importantly: This is a HACK. If you want to use a depth texture, you're much better off using the actual "texture_depth_2d" type in WGSL.
-    // However, both Tint and Naga never use that, since WGSL is (seemingly) the only shader language that cares.
-    // So, you'd need to rewrite your code to use "sampler_comparison" instead of "sampler", which is a giant pain.
-    // Code snippet:
-    /*
-     * //SDLGPU_ForceAllowSamplingForTexture(2, 0)
-     * @group(2u) @binding(0u) var DepthTexture: texture_2d<f32>
-     */
-
-    const char *sourceView = shaderSource;
-    const char *sourceEnd = shaderSource + SDL_strlen(shaderSource);
-
-    const char *parsedBegin = NULL;
-    const char *parsedEnd = NULL;
-
-    Uint32 keywordProgress = 0;
-
-    char **hits = NULL;
-    Uint32 hitsCount = 0;
-    Uint32 hitsCapacity = 0;
-
-    char *trimmed = SDL_calloc(1, SDL_strlen(shaderSource));
-    char *trimmedView = trimmed;
-    char *trimmedEnd = trimmed;
-
-    // gross hack
-    bool isBindingLocationUnfilterable[4][WEBGPU_INTERNAL_MAX_UNFILTERABLE_BINDINGS] = { 0 };
-
+    bool unfilterable[4][WEBGPU_INTERNAL_WGSL_MAX_DIRECTIVE_BINDINGS] = { 0 };
     for (Uint32 slot = 0; slot < MAX_TEXTURE_SAMPLERS_PER_STAGE; slot++) {
         if (unfilterableSamplerSlots & (1u << slot)) {
-            isBindingLocationUnfilterable[samplerGroup][2 * slot] = true;
+            unfilterable[samplerGroup][2 * slot] = true;
         }
     }
+    WEBGPU_INTERNAL_WGSL_CollectUnfilterableTextureDirectives(shaderSource, shaderSourceLength, unfilterable);
 
-    // We'll remove all of the whitespace from shaderSource to make parsing easier
-    while (sourceView < sourceEnd) {
-        if (!SDL_isspace((unsigned char)*sourceView)) {
-            *trimmedView++ = *sourceView;
-            trimmedEnd = trimmedView;
-        }
-        sourceView++;
-    }
+    WGSLTokenizer tokenizer = { shaderSource, shaderSource + shaderSourceLength };
+    WGSLToken token;
+    int group = WEBGPU_INTERNAL_WGSL_ATTRIBUTE_ABSENT;
+    int binding = WEBGPU_INTERNAL_WGSL_ATTRIBUTE_ABSENT;
 
-    trimmedView = trimmed;
-    while (trimmedView < trimmedEnd) {
-        // First we'll check for SDLGPU_ForceAllowSamplingForTexture.
-        char *hackFix = SDL_strstr(trimmedView, "SDLGPU_ForceAllowSamplingForTexture");
-        if (hackFix != NULL) {
-            int group = 0;
-            int binding = 0;
-            if (SDL_sscanf(hackFix, "SDLGPU_ForceAllowSamplingForTexture(%d,%d)", &group, &binding) != 0) {
-                if (group >= 0 && group < 4 && binding >= 0 && binding < WEBGPU_INTERNAL_MAX_UNFILTERABLE_BINDINGS) {
-                    isBindingLocationUnfilterable[group][binding] = true;
+    while (WEBGPU_INTERNAL_WGSL_NextToken(&tokenizer, &token)) {
+        if (WEBGPU_INTERNAL_WGSL_TokenIsChar(&token, '@')) {
+            WGSLToken attribute;
+            if (!WEBGPU_INTERNAL_WGSL_NextToken(&tokenizer, &attribute)) {
+                break;
+            }
+            if (WEBGPU_INTERNAL_WGSL_TokenEquals(&attribute, "group")) {
+                group = WEBGPU_INTERNAL_WGSL_ParseAttributeIndex(&tokenizer);
+            } else if (WEBGPU_INTERNAL_WGSL_TokenEquals(&attribute, "binding")) {
+                binding = WEBGPU_INTERNAL_WGSL_ParseAttributeIndex(&tokenizer);
+            } else if (WEBGPU_INTERNAL_WGSL_AcceptChar(&tokenizer, '(')) {
+                WEBGPU_INTERNAL_WGSL_SkipBalanced(&tokenizer, '(', ')');
+            }
+        } else if (WEBGPU_INTERNAL_WGSL_TokenEquals(&token, "var")) {
+            if (group == WEBGPU_INTERNAL_WGSL_ATTRIBUTE_NOT_LITERAL || binding == WEBGPU_INTERNAL_WGSL_ATTRIBUTE_NOT_LITERAL || (group >= 0) != (binding >= 0)) {
+                SDL_LogError(SDL_LOG_CATEGORY_GPU, "Resource declaration skipped; @group and @binding must both be present with integer literal arguments");
+            } else if (group >= 0 && binding >= 0) {
+                WebGPUInferredBindGroupLayoutEntry entry = { 0 };
+                entry.group = (Uint32)group;
+                entry.binding = (Uint32)binding;
+                if (WEBGPU_INTERNAL_WGSL_ParseResourceDeclaration(&tokenizer, unfilterable, &entry)) {
+                    WEBGPU_INTERNAL_InsertElementIntoArray(entries, entryCapacity, entryCount, WebGPUInferredBindGroupLayoutEntry, entry);
                 }
             }
-
-            trimmedView = hackFix;
+            group = WEBGPU_INTERNAL_WGSL_ATTRIBUTE_ABSENT;
+            binding = WEBGPU_INTERNAL_WGSL_ATTRIBUTE_ABSENT;
+        } else if (WEBGPU_INTERNAL_WGSL_TokenIsChar(&token, ';') || WEBGPU_INTERNAL_WGSL_TokenIsChar(&token, '{') || WEBGPU_INTERNAL_WGSL_TokenIsChar(&token, '}') || WEBGPU_INTERNAL_WGSL_TokenEquals(&token, "fn") || WEBGPU_INTERNAL_WGSL_TokenEquals(&token, "struct")) {
+            group = WEBGPU_INTERNAL_WGSL_ATTRIBUTE_ABSENT;
+            binding = WEBGPU_INTERNAL_WGSL_ATTRIBUTE_ABSENT;
         }
-
-        char *token = SDL_strstr(trimmedView, keywords[keywordProgress]);
-
-        if (token == NULL) {
-            keywordProgress = 0;
-            trimmedView = trimmedEnd;
-            break;
-        }
-
-        if (keywordProgress == 0) {
-            parsedBegin = token;
-        } else if (keywordProgress == 2) {
-            // We'll end at the first semicolon we find
-            parsedEnd = SDL_strstr(token, ";");
-            char *parsed = SDL_strndup(parsedBegin, parsedEnd - parsedBegin); // We could *probably* just use another view for this but I'm really bad with C strings so I'd rather do this
-
-            WEBGPU_INTERNAL_InsertElementIntoArray(hits, hitsCapacity, hitsCount, char *, parsed);
-        }
-
-        keywordProgress = keywordProgress == 2 ? 0 : keywordProgress + 1;
-        trimmedView = token;
     }
-
-    // Alright, we've now got an array of binding definitions (i don't really know what to call them lmao),
-    // so now we'll look through each one and attempt to figure out what they are
-    for (int i = 0; i < hitsCount; i++) {
-        WebGPUInferredBindGroupLayoutEntry entry = { 0 };
-
-        char *bind = hits[i];
-        bool isUniform = SDL_strstr(bind, "<uniform>") != NULL;
-
-        if (isUniform) {
-            continue; // Uniform layouts are constant
-        }
-
-        entry.group = WEBGPU_INTERNAL_GetTokenBindGroup(bind);
-        entry.binding = WEBGPU_INTERNAL_GetTokenBindLocation(bind);
-        entry.type = WEBGPU_INTERNAL_GetEntryTypeFromToken(bind);
-
-        switch (entry.type) {
-        case WEBGPU_BIND_GROUP_ENTRY_TYPE_UNKNOWN:
-            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Unknown entry type for parsed binding!"); // Wow I'm bad at writing error messages
-            break;
-        case WEBGPU_BIND_GROUP_ENTRY_TYPE_SAMPLER:
-            // Basic bounds checking, doesn't actually check to see if the binding is in the right group as defined by SDLGPU
-            if (entry.group < 4 && entry.binding < WEBGPU_INTERNAL_MAX_UNFILTERABLE_BINDINGS) {
-                entry.sampler.bindType = (isBindingLocationUnfilterable[entry.group][SDL_max(entry.binding - 1, 0)]) ? WGPUSamplerBindingType_NonFiltering : WEBGPU_INTERNAL_GetSamplerBindTypeFromToken(bind);
-            }
-            break;
-        case WEBGPU_BIND_GROUP_ENTRY_TYPE_TEXTURE:
-            entry.texture.dimension = WEBGPU_INTERNAL_GetTextureViewDimensionFromToken(bind);
-            entry.texture.format = WEBGPU_INTERNAL_GetTextureFormatFromToken(bind);
-            entry.texture.isDepth = WEBGPU_INTERNAL_TokenIsDepthTexture(bind);
-            entry.texture.isMultisampled = WEBGPU_INTERNAL_TokenIsMultisampledTexture(bind);
-            if (entry.group < 4 && entry.binding < WEBGPU_INTERNAL_MAX_UNFILTERABLE_BINDINGS) {
-                entry.texture.isForciblyUnfilterable = isBindingLocationUnfilterable[entry.group][entry.binding];
-            }
-            break;
-        case WEBGPU_BIND_GROUP_ENTRY_TYPE_STORAGE_BUFFER:
-            // TODO: Throw this into an active volcano
-            entry.storageBuffer.canRead = SDL_strstr(bind, "read") || SDL_strstr(bind, "read_write");
-            entry.storageBuffer.canWrite = SDL_strstr(bind, "write") || SDL_strstr(bind, "read_write");
-            break;
-        case WEBGPU_BIND_GROUP_ENTRY_TYPE_STORAGE_TEXTURE:
-            entry.storageTexture.dimension = WEBGPU_INTERNAL_GetTextureViewDimensionFromToken(bind);
-            entry.storageTexture.format = WEBGPU_INTERNAL_GetTextureFormatFromToken(bind);
-            entry.storageTexture.access = WEBGPU_INTERNAL_GetStorageTextureAccessFromToken(bind);
-            break;
-        }
-
-        WEBGPU_INTERNAL_InsertElementIntoArray(entries, entryCapacity, entryCount, WebGPUInferredBindGroupLayoutEntry, entry);
-    }
-
-    for (int i = 0; i < hitsCount; i++) {
-        SDL_free(hits[i]);
-    }
-    SDL_free(trimmed);
-    SDL_free(hits);
 
     *storePtr = entries;
     return entryCount;
 }
 
-// Alright I did some shoddy benchmarking of this.
-//
-// On a single 7950X thread with DDR5-6000 running on Linux (Release build, ofc)
-// this can chug through about 18MiB of shader source code a second.
-//
-// Really slow, but for our purposes it'll work.
-//
-// For context: Tint's autogenerated ports of all the SDL_gpu_example shaders comes out to about 26KiB in total, which would take
-// roughly 1-2 MS.
-//
-// The larger issue with this is that we're memory leaking. I'm bad with C strings so I don't know /where/ it's leaking but I do know it is.
-static WebGPUShaderBindGroupLayouts *WEBGPU_INTERNAL_GenerateBindGroupLayoutsForShader(const char *shaderSource,
-                                                                                       WebGPURenderer *renderer,
-                                                                                       WGPUShaderStage stage,
-                                                                                       Uint32 unfilterableSamplerSlots)
+static WebGPUShaderBindGroupLayouts *WEBGPU_INTERNAL_GenerateBindGroupLayoutsForShader(const char *shaderSource, size_t shaderSourceLength, WebGPURenderer *renderer, WGPUShaderStage stage, Uint32 unfilterableSamplerSlots)
 {
     WebGPUShaderBindGroupLayouts *result = SDL_calloc(1, sizeof(WebGPUShaderBindGroupLayouts));
     WebGPUInferredBindGroupLayoutEntry *entries = NULL;
     // Vertex sampled textures live in group 0, fragment ones in group 2.
     Uint32 samplerGroup = stage == WGPUShaderStage_Vertex ? 0 : 2;
-    Uint32 numParsedEntries = WEBGPU_INTERNAL_ParseBindGroupLayoutEntriesFromShader(shaderSource, samplerGroup, unfilterableSamplerSlots, &entries);
+    Uint32 numParsedEntries = WEBGPU_INTERNAL_ParseBindGroupLayoutEntriesFromShader(shaderSource, shaderSourceLength, samplerGroup, unfilterableSamplerSlots, &entries);
 
     WGPUBindGroupLayoutEntry *samplerEntries = NULL;
     WGPUBindGroupLayoutEntry *uniformEntries = NULL;
@@ -2344,22 +2355,15 @@ static WebGPUShaderBindGroupLayouts *WEBGPU_INTERNAL_GenerateBindGroupLayoutsFor
         switch (parsedEntry->type) {
         case WEBGPU_BIND_GROUP_ENTRY_TYPE_UNKNOWN:
             SDL_LogError(SDL_LOG_CATEGORY_GPU, "Parsed bind group entry has unknown type!");
-            break;
+            continue;
         case WEBGPU_BIND_GROUP_ENTRY_TYPE_SAMPLER:
             entry.sampler.type = parsedEntry->sampler.bindType;
             break;
         case WEBGPU_BIND_GROUP_ENTRY_TYPE_TEXTURE:
             entry.texture.viewDimension = parsedEntry->texture.dimension;
             entry.texture.multisampled = parsedEntry->texture.isMultisampled;
+            entry.texture.sampleType = parsedEntry->texture.sampleType;
             entry.texture.nextInChain = NULL;
-
-            if (parsedEntry->texture.isForciblyUnfilterable) {
-                entry.texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
-            } else if (parsedEntry->texture.isDepth) {
-                entry.texture.sampleType = WGPUTextureSampleType_Depth;
-            } else {
-                entry.texture.sampleType = WGPUTextureSampleType_Float;
-            }
             break;
         case WEBGPU_BIND_GROUP_ENTRY_TYPE_STORAGE_BUFFER:
             entry.buffer.type = parsedEntry->storageBuffer.canWrite ? WGPUBufferBindingType_Storage : WGPUBufferBindingType_ReadOnlyStorage;
@@ -2415,14 +2419,12 @@ static WebGPUShaderBindGroupLayouts *WEBGPU_INTERNAL_GenerateBindGroupLayoutsFor
     return result;
 }
 
-static WebGPUComputeShaderBindGroupLayouts *WEBGPU_INTERNAL_GenerateBindGroupLayoutsForComputeShader(const char *shaderSource,
-                                                                                                     WebGPURenderer *renderer,
-                                                                                                     Uint32 unfilterableSamplerSlots)
+static WebGPUComputeShaderBindGroupLayouts *WEBGPU_INTERNAL_GenerateBindGroupLayoutsForComputeShader(const char *shaderSource, size_t shaderSourceLength, WebGPURenderer *renderer, Uint32 unfilterableSamplerSlots)
 {
     WebGPUComputeShaderBindGroupLayouts *result = SDL_calloc(1, sizeof(WebGPUComputeShaderBindGroupLayouts));
     WebGPUInferredBindGroupLayoutEntry *entries = NULL;
     // Compute sampled textures live in group 0.
-    Uint32 numParsedEntries = WEBGPU_INTERNAL_ParseBindGroupLayoutEntriesFromShader(shaderSource, 0, unfilterableSamplerSlots, &entries);
+    Uint32 numParsedEntries = WEBGPU_INTERNAL_ParseBindGroupLayoutEntriesFromShader(shaderSource, shaderSourceLength, 0, unfilterableSamplerSlots, &entries);
 
     WGPUBindGroupLayoutEntry *samplerEntries = NULL;
     WGPUBindGroupLayoutEntry *readWriteEntries = NULL;
@@ -2457,18 +2459,12 @@ static WebGPUComputeShaderBindGroupLayouts *WEBGPU_INTERNAL_GenerateBindGroupLay
         switch (parsedEntry->type) {
         case WEBGPU_BIND_GROUP_ENTRY_TYPE_UNKNOWN:
             SDL_LogError(SDL_LOG_CATEGORY_GPU, "Parsed bind group entry has unknown type!");
-            break;
+            continue;
         case WEBGPU_BIND_GROUP_ENTRY_TYPE_SAMPLER:
             entry.sampler.type = parsedEntry->sampler.bindType;
             break;
         case WEBGPU_BIND_GROUP_ENTRY_TYPE_TEXTURE:
-            if (parsedEntry->texture.isForciblyUnfilterable) {
-                entry.texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
-            } else if (parsedEntry->texture.isDepth) {
-                entry.texture.sampleType = WGPUTextureSampleType_Depth;
-            } else {
-                entry.texture.sampleType = WebGPUTextureFormatToSampleType(parsedEntry->texture.format);
-            }
+            entry.texture.sampleType = parsedEntry->texture.sampleType;
             entry.texture.viewDimension = parsedEntry->texture.dimension;
             entry.texture.multisampled = parsedEntry->texture.isMultisampled;
             entry.texture.nextInChain = NULL;
@@ -2609,11 +2605,34 @@ static void WEBGPU_INTERNAL_ReleaseSampler(WebGPURenderer *renderer, WebGPUSampl
 static void WEBGPU_INTERNAL_ReleaseBuffer(WebGPURenderer *renderer, WebGPUBuffer *buffer);
 static void WEBGPU_INTERNAL_ReleaseBufferContainer(WebGPURenderer *renderer, WebGPUBufferContainer *container);
 
+static void WEBGPU_INTERNAL_ReleaseTrackedResources(WebGPUSubmittedCommandBuffer *submitted)
+{
+    for (int i = 0; i < submitted->usedBufferCount; i++) {
+        (void)SDL_AtomicDecRef(&submitted->usedBuffers[i]->referenceCount);
+    }
+
+    for (int i = 0; i < submitted->usedTextureCount; i++) {
+        (void)SDL_AtomicDecRef(&submitted->usedTextures[i]->referenceCount);
+    }
+
+    SDL_free(submitted->usedTextures);
+    SDL_free(submitted->usedBuffers);
+    submitted->usedTextures = NULL;
+    submitted->usedBuffers = NULL;
+    submitted->usedTextureCount = submitted->usedTextureCapacity = 0;
+    submitted->usedBufferCount = submitted->usedBufferCapacity = 0;
+}
+
 static void WEBGPU_INTERNAL_HandlePendingDestroys(WebGPURenderer *renderer)
 {
     WebGPUQueuedDestroy **newQueuedDestroys = NULL;
     Uint32 newQueuedDestroysCapacity = 0;
     Uint32 newQueuedDestroysCount = 0;
+
+    // Submit and the reap paths both touch submittedCommandBuffers, and both locks are recursive,
+    // so this is safe to call from inside WEBGPU_Submit as well.
+    SDL_LockMutex(renderer->submittingCommandBufferLock);
+    SDL_LockMutex(renderer->registeringQueuedDestroyLock);
 
     // This needs to be run before the destruction loop since this function
     // is what queues the submitted command buffers for freeing.
@@ -2690,26 +2709,21 @@ static void WEBGPU_INTERNAL_HandlePendingDestroys(WebGPURenderer *renderer)
                 }
                 break;
             case WEBGPU_QUEUED_DESTROY_FENCE:
-                WEBGPU_INTERNAL_WaitForFences(renderer, true, &current->resource.fence, 1);
-
-                SDL_free(current->resource.fence);
-                wasReleased = true;
-
+                // The fence callback writes into the fence, so it can only be freed once signaled.
+                if (WEBGPU_INTERNAL_QueryFence(renderer, current->resource.fence)) {
+                    SDL_free(current->resource.fence);
+                    wasReleased = true;
+                } else if (forciblyDestroy) {
+                    // Leak it on purpose rather than free memory a late callback could still write to.
+                    SDL_LogWarn(SDL_LOG_CATEGORY_GPU, "Fence never signaled; dropping it from the destroy queue without freeing.");
+                    wasReleased = true;
+                }
                 break;
             case WEBGPU_QUEUED_DESTROY_SUBMITTED_COMMAND_BUFFER:
                 // NOTE: I disabled this. I'm sure this won't come back to bite me in the ass.
                 // WEBGPU_INTERNAL_WaitForFences(renderer, true, &current->resource.submittedCommandBuffer->fence, 1);
 
-                for (int j = 0; j < current->resource.submittedCommandBuffer->usedBufferCount; j++) {
-                    (void)SDL_AtomicDecRef(&current->resource.submittedCommandBuffer->usedBuffers[j]->referenceCount);
-                }
-
-                for (int j = 0; j < current->resource.submittedCommandBuffer->usedTextureCount; j++) {
-                    (void)SDL_AtomicDecRef(&current->resource.submittedCommandBuffer->usedTextures[j]->referenceCount);
-                }
-
-                SDL_free(current->resource.submittedCommandBuffer->usedTextures);
-                SDL_free(current->resource.submittedCommandBuffer->usedBuffers);
+                WEBGPU_INTERNAL_ReleaseTrackedResources(current->resource.submittedCommandBuffer);
                 SDL_free(current->resource.submittedCommandBuffer->fence);
                 SDL_free(current->resource.submittedCommandBuffer);
 
@@ -2738,6 +2752,9 @@ static void WEBGPU_INTERNAL_HandlePendingDestroys(WebGPURenderer *renderer)
         renderer->queuedDestroyCount = newQueuedDestroysCount;
         renderer->queuedDestroys = newQueuedDestroys;
     }
+
+    SDL_UnlockMutex(renderer->registeringQueuedDestroyLock);
+    SDL_UnlockMutex(renderer->submittingCommandBufferLock);
 }
 
 static WebGPUBindGroupCacheKey WEBGPU_INTERNAL_GenerateKeyForCurrentBinds(WebGPUCommandBuffer *cmdBuf, WebGPUBindGroupType desiredGroup)
@@ -3378,6 +3395,10 @@ static bool WEBGPU_AcquireSwapchainTexture(SDL_GPUCommandBuffer *commandBuffer, 
 {
     WebGPUCommandBuffer *cmdBuf = (WebGPUCommandBuffer *)commandBuffer;
 
+    // Reap finished submissions first, otherwise a caller that only ever uses the
+    // non-blocking acquire hits the frames-in-flight cap and never recovers.
+    WEBGPU_INTERNAL_HandlePendingDestroys(cmdBuf->renderer);
+
     if (cmdBuf->renderer->submittedCommandBufferCount >= cmdBuf->renderer->maxFramesInFlight) {
         *swapchainTexture = NULL;
         return true;
@@ -3479,7 +3500,7 @@ static SDL_GPUShader *WEBGPU_CreateShader(
 
     shader->entrypoint = SDL_strdup(createinfo->entrypoint);
     Uint32 unfilterableSamplerSlots = (Uint32)SDL_GetNumberProperty(createinfo->props, SDL_PROP_GPU_SHADER_CREATE_WEBGPU_UNFILTERABLE_SAMPLER_SLOTS_NUMBER, 0);
-    shader->bindGroupLayouts = WEBGPU_INTERNAL_GenerateBindGroupLayoutsForShader((char *)createinfo->code, ((WebGPURenderer *)driverData),
+    shader->bindGroupLayouts = WEBGPU_INTERNAL_GenerateBindGroupLayoutsForShader((const char *)createinfo->code, createinfo->code_size, ((WebGPURenderer *)driverData),
                                                                                  createinfo->stage == SDL_GPU_SHADERSTAGE_VERTEX ? WGPUShaderStage_Vertex : WGPUShaderStage_Fragment, unfilterableSamplerSlots);
 
     return (SDL_GPUShader *)shader;
@@ -4535,6 +4556,12 @@ static void WEBGPU_InsertDebugLabel(SDL_GPUCommandBuffer *commandBuffer, const c
     }
 }
 
+static void WEBGPU_INTERNAL_TrackRenderArea(WebGPUCommandBuffer *cmdBuf, WGPUTexture texture, Uint32 mipLevel)
+{
+    cmdBuf->renderAreaW = SDL_min(cmdBuf->renderAreaW, SDL_max(wgpuTextureGetWidth(texture) >> mipLevel, 1));
+    cmdBuf->renderAreaH = SDL_min(cmdBuf->renderAreaH, SDL_max(wgpuTextureGetHeight(texture) >> mipLevel, 1));
+}
+
 static void WEBGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer, const SDL_GPUColorTargetInfo *colorTargetInfos,
                                    Uint32 numColorTargets, const SDL_GPUDepthStencilTargetInfo *depthStencilTargetInfo)
 {
@@ -4547,10 +4574,8 @@ static void WEBGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer, const SD
 
     colorAttachments = (WGPURenderPassColorAttachment *)SDL_calloc(numColorTargets, sizeof(*colorAttachments));
 
-    // these are by default 0, so SDL_min would always favour
-    // them over the texture's dimensions if we didn't do this
-    wrapper->smallestColorTargetW = SDL_MAX_UINT32;
-    wrapper->smallestColorTargetH = SDL_MAX_UINT32;
+    wrapper->renderAreaW = SDL_MAX_UINT32;
+    wrapper->renderAreaH = SDL_MAX_UINT32;
 
     for (int i = 0; i < numColorTargets; i++) {
         WebGPUTexture *texture = ((WebGPUTextureContainer *)colorTargetInfos[i].texture)->activeTexture;
@@ -4562,8 +4587,7 @@ static void WEBGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer, const SD
         colorAttachments[i].storeOp = SDLToWebGPU_StoreOp[colorTargetInfos[i].store_op];
         colorAttachments[i].depthSlice = texture->type == SDL_GPU_TEXTURETYPE_3D ? colorTargetInfos[i].layer_or_depth_plane : WGPU_DEPTH_SLICE_UNDEFINED;
 
-        wrapper->smallestColorTargetW = SDL_min(wrapper->smallestColorTargetW, wgpuTextureGetWidth(((WebGPUTextureContainer *)colorTargetInfos[i].texture)->activeTexture->texture));
-        wrapper->smallestColorTargetH = SDL_min(wrapper->smallestColorTargetH, wgpuTextureGetHeight(((WebGPUTextureContainer *)colorTargetInfos[i].texture)->activeTexture->texture));
+        WEBGPU_INTERNAL_TrackRenderArea(wrapper, texture->texture, colorTargetInfos[i].mip_level);
 
         switch (((WebGPUTextureContainer *)colorTargetInfos[i].texture)->activeTexture->type) {
         case SDL_GPU_TEXTURETYPE_3D:
@@ -4594,6 +4618,7 @@ static void WEBGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer, const SD
 
     if (depthStencilTargetInfo != NULL) {
         SDL_GPUTextureFormat textureFormat = ((WebGPUTextureContainer *)depthStencilTargetInfo->texture)->header.info.format;
+        WEBGPU_INTERNAL_TrackRenderArea(wrapper, ((WebGPUTextureContainer *)depthStencilTargetInfo->texture)->activeTexture->texture, depthStencilTargetInfo->mip_level);
         depthStencilAttachment = (WGPURenderPassDepthStencilAttachment *)SDL_calloc(1, sizeof(*depthStencilAttachment));
 
         depthStencilAttachment->depthClearValue = depthStencilTargetInfo->clear_depth;
@@ -4623,7 +4648,15 @@ static void WEBGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer, const SD
 
 static void WEBGPU_SetViewport(SDL_GPUCommandBuffer *renderPass, const SDL_GPUViewport *viewport)
 {
-    wgpuRenderPassEncoderSetViewport(((WebGPUCommandBuffer *)renderPass)->renderPassEncoder, viewport->x, viewport->y, viewport->w, viewport->h, viewport->min_depth, viewport->max_depth);
+    WebGPUCommandBuffer *cmdBuf = (WebGPUCommandBuffer *)renderPass;
+    float x = SDL_clamp(viewport->x, 0.0f, (float)cmdBuf->renderAreaW);
+    float y = SDL_clamp(viewport->y, 0.0f, (float)cmdBuf->renderAreaH);
+    float w = SDL_clamp(viewport->x + viewport->w, x, (float)cmdBuf->renderAreaW) - x;
+    float h = SDL_clamp(viewport->y + viewport->h, y, (float)cmdBuf->renderAreaH) - y;
+    float minDepth = SDL_clamp(viewport->min_depth, 0.0f, 1.0f);
+    float maxDepth = SDL_clamp(viewport->max_depth, minDepth, 1.0f);
+
+    wgpuRenderPassEncoderSetViewport(cmdBuf->renderPassEncoder, x, y, w, h, minDepth, maxDepth);
 }
 
 static void WEBGPU_PushVertexUniformData(SDL_GPUCommandBuffer *commandBuffer, Uint32 slotIndex, const void *data, uint32_t length)
@@ -4692,16 +4725,16 @@ static void WEBGPU_SetBlendConstants(SDL_GPUCommandBuffer *commandBuffer, SDL_FC
     wgpuRenderPassEncoderSetBlendConstant(((WebGPUCommandBuffer *)commandBuffer)->renderPassEncoder, &(WGPUColor){ blendConstants.a, blendConstants.r, blendConstants.g, blendConstants.b });
 }
 
+// Native backends accept rects that hang over the render area; WebGPU does not, so clamp to keep them equivalent.
 static void WEBGPU_SetScissor(SDL_GPUCommandBuffer *commandBuffer, const SDL_Rect *scissor)
 {
-    if ((scissor->w <= ((WebGPUCommandBuffer *)commandBuffer)->smallestColorTargetW) &&
-        (scissor->h <= ((WebGPUCommandBuffer *)commandBuffer)->smallestColorTargetH)) {
-        wgpuRenderPassEncoderSetScissorRect(((WebGPUCommandBuffer *)commandBuffer)->renderPassEncoder, scissor->x, scissor->y, scissor->w, scissor->h);
-    } else if (((WebGPUCommandBuffer *)commandBuffer)->renderer->debugMode) {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Attempting to use a scissor of size (%u, %u) with a "
-                                           "smaller render target of size (%u, %u)! This is disallowed by the WebGPU spec.",
-                     scissor->w, scissor->h, ((WebGPUCommandBuffer *)commandBuffer)->smallestColorTargetW, ((WebGPUCommandBuffer *)commandBuffer)->smallestColorTargetH);
-    }
+    WebGPUCommandBuffer *cmdBuf = (WebGPUCommandBuffer *)commandBuffer;
+    Uint32 x = (Uint32)SDL_clamp(scissor->x, 0, (int)cmdBuf->renderAreaW);
+    Uint32 y = (Uint32)SDL_clamp(scissor->y, 0, (int)cmdBuf->renderAreaH);
+    Uint32 w = (Uint32)SDL_clamp(scissor->x + scissor->w, (int)x, (int)cmdBuf->renderAreaW) - x;
+    Uint32 h = (Uint32)SDL_clamp(scissor->y + scissor->h, (int)y, (int)cmdBuf->renderAreaH) - y;
+
+    wgpuRenderPassEncoderSetScissorRect(cmdBuf->renderPassEncoder, x, y, w, h);
 }
 
 static bool WEBGPU_WaitAndAcquireSwapchainTexture(SDL_GPUCommandBuffer *command_buffer, SDL_Window *window, SDL_GPUTexture **swapchain_texture, Uint32 *swapchain_texture_width, Uint32 *swapchain_texture_height)
@@ -5091,7 +5124,7 @@ static SDL_GPUComputePipeline *WEBGPU_CreateComputePipeline(SDL_GPURenderer *dev
     }
 
     Uint32 unfilterableSamplerSlots = (Uint32)SDL_GetNumberProperty(createInfo->props, SDL_PROP_GPU_COMPUTEPIPELINE_CREATE_WEBGPU_UNFILTERABLE_SAMPLER_SLOTS_NUMBER, 0);
-    pipeline->bindGroupLayouts = WEBGPU_INTERNAL_GenerateBindGroupLayoutsForComputeShader((char *)createInfo->code, ((WebGPURenderer *)device), unfilterableSamplerSlots);
+    pipeline->bindGroupLayouts = WEBGPU_INTERNAL_GenerateBindGroupLayoutsForComputeShader((const char *)createInfo->code, createInfo->code_size, ((WebGPURenderer *)device), unfilterableSamplerSlots);
 
     if (pipeline->bindGroupLayouts == NULL) {
         SDL_SetError("Failed to generate bind group layouts for compute shader!");
@@ -5266,6 +5299,23 @@ static void WEBGPU_DispatchComputeIndirect(SDL_GPUCommandBuffer *commandBuffer, 
     wgpuComputePassEncoderDispatchWorkgroupsIndirect(cmdBuf->computePassEncoder, ((WebGPUBufferContainer *)buffer)->activeBuffer->buffer, offset);
 }
 
+static void WEBGPU_INTERNAL_ReleaseAcquiredSwapchainTextures(WebGPUCommandBuffer *cmdBuf)
+{
+    for (int i = 0; i < cmdBuf->swapchainTextureCount; i++) {
+        WebGPUTextureContainer *container = cmdBuf->acquiredSwapchainTextures[i];
+
+        for (int j = 0; j < container->textureCount; j++) {
+            WEBGPU_INTERNAL_ReleaseTexture(cmdBuf->renderer, container->textures[j]);
+        }
+
+        SDL_free(container->textures);
+        SDL_free(container);
+    }
+
+    cmdBuf->swapchainTextureCount = 0;
+    cmdBuf->surfaceCount = 0;
+}
+
 static void WEBGPU_INTERNAL_UploadQueuedUniformData(WebGPUCommandBuffer *cmdBuf)
 {
     for (int i = 0; i < cmdBuf->numQueuedUniformUploads; i++) {
@@ -5274,6 +5324,8 @@ static void WEBGPU_INTERNAL_UploadQueuedUniformData(WebGPUCommandBuffer *cmdBuf)
         wgpuQueueWriteBuffer(cmdBuf->queue, cmdBuf->renderer->uniformBuffers[upload.slot]->activeBuffer->buffer, upload.offset, upload.data, upload.length);
         SDL_free(upload.data);
     }
+
+    cmdBuf->numQueuedUniformUploads = 0;
 }
 
 static bool WEBGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
@@ -5287,6 +5339,7 @@ static bool WEBGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
     SDL_LockMutex(renderer->submittingCommandBufferLock);
 
     if (isMainThread) {
+        WEBGPU_INTERNAL_HandlePendingDestroys(renderer);
         WEBGPU_INTERNAL_UploadQueuedUniformData(wrapper);
     }
 
@@ -5297,8 +5350,15 @@ static bool WEBGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
 #endif
 
     if (!cmdBuf) {
-        SDL_free(commandBuffer);
-        return false;
+        for (int i = 0; i < wrapper->numQueuedUniformUploads; i++) {
+            SDL_free(wrapper->queuedUniformUploads[i].data);
+        }
+        WEBGPU_INTERNAL_ReleaseTrackedResources(&wrapper->submitted);
+        WEBGPU_INTERNAL_ReleaseAcquiredSwapchainTextures(wrapper);
+        wgpuCommandEncoderRelease(wrapper->encoder);
+        WEBGPU_INTERNAL_FreeCommandBuffer(wrapper);
+        SDL_UnlockMutex(renderer->submittingCommandBufferLock);
+        return SDL_SetError("Could not finish WebGPU command encoder!");
     }
 
     if (wrapper->renderer->queueDoneFence != NULL) {
@@ -5324,16 +5384,7 @@ static bool WEBGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
             wgpuSurfacePresent(wrapper->surfaces[i]);
         }
 #endif
-        for (int i = 0; i < wrapper->swapchainTextureCount; i++) {
-            WebGPUTextureContainer *container = wrapper->acquiredSwapchainTextures[i];
-
-            for (int j = 0; j < container->textureCount; j++) {
-                WEBGPU_INTERNAL_ReleaseTexture(wrapper->renderer, container->textures[j]);
-            }
-
-            SDL_free(container->textures);
-            SDL_free(container);
-        }
+        WEBGPU_INTERNAL_ReleaseAcquiredSwapchainTextures(wrapper);
     }
     wgpuCommandEncoderRelease(wrapper->encoder);
     wgpuCommandBufferRelease(cmdBuf);
@@ -5351,9 +5402,49 @@ static bool WEBGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
 
 static SDL_GPUFence *WEBGPU_SubmitAndAcquireFence(SDL_GPUCommandBuffer *commandBuffer)
 {
-    WEBGPU_Submit(commandBuffer);
+    // Submit frees the wrapper, so grab the queue first.
+    WGPUQueue queue = ((WebGPUCommandBuffer *)commandBuffer)->queue;
 
-    return (SDL_GPUFence *)WEBGPU_INTERNAL_CreateFence(((WebGPUCommandBuffer *)commandBuffer)->queue);
+    if (!WEBGPU_Submit(commandBuffer)) {
+        return NULL;
+    }
+
+    return (SDL_GPUFence *)WEBGPU_INTERNAL_CreateFence(queue);
+}
+
+static void WEBGPU_INTERNAL_ReleaseWebGPUObjects(WebGPURenderer *renderer)
+{
+    if (renderer->queue != NULL) {
+        wgpuQueueRelease(renderer->queue);
+    }
+    if (renderer->device != NULL) {
+        // FIXME: Releasing an SDL-created device leaks a bunch of memory each time!!! There's 100% some resource I'm not freeing.
+        // For an adopted device this only drops the reference SDL took when adopting it.
+        if (!renderer->ownsDevice) {
+            wgpuDeviceRelease(renderer->device);
+        }
+    }
+    if (renderer->adapter != NULL) {
+        wgpuAdapterRelease(renderer->adapter);
+    }
+    if (renderer->instance != NULL) {
+        wgpuInstanceRelease(renderer->instance);
+    }
+}
+
+// Tears down a renderer that failed part-way through WEBGPU_CreateDevice.
+static void WEBGPU_INTERNAL_DestroyPartialRenderer(WebGPURenderer *renderer)
+{
+    WEBGPU_INTERNAL_ReleaseWebGPUObjects(renderer);
+
+    SDL_DestroyMutex(renderer->queryingFenceLock);
+    SDL_DestroyMutex(renderer->destroyingSelfLock);
+    SDL_DestroyMutex(renderer->registeringQueuedDestroyLock);
+    SDL_DestroyMutex(renderer->submittingCommandBufferLock);
+    SDL_DestroyMutex(renderer->creatingWebGPUResourceLock);
+    SDL_DestroyHashTable(renderer->bindGroupHashTable);
+    SDL_DestroyProperties(renderer->props);
+    SDL_free(renderer);
 }
 
 static void WEBGPU_DestroyDevice(SDL_GPUDevice *device)
@@ -5383,11 +5474,7 @@ static void WEBGPU_DestroyDevice(SDL_GPUDevice *device)
     SDL_DestroyMutex(renderer->submittingCommandBufferLock);
     SDL_DestroyMutex(renderer->creatingWebGPUResourceLock);
 
-    wgpuQueueRelease(renderer->queue);
-    // FIXME: Releasing the device leaks a bunch of memory each time!!! There's 100% some resource I'm not freeing.
-    // wgpuDeviceRelease(renderer->device);
-    wgpuAdapterRelease(renderer->adapter);
-    wgpuInstanceRelease(renderer->instance);
+    WEBGPU_INTERNAL_ReleaseWebGPUObjects(renderer);
 
     SDL_DestroyHashTable(renderer->bindGroupHashTable);
 
@@ -5670,7 +5757,6 @@ static void WEBGPU_INTERNAL_InitUniformBuffers(WebGPURenderer *renderer)
     }
 }
 
-// -- UNIMPLEMENTED FUNCTIONS --
 static bool WEBGPU_WaitForSwapchain(SDL_GPURenderer *driverData, SDL_Window *window)
 {
     SDL_assert_release(!"WEBGPU_WaitForSwapchain is unimplemented! Reason: WebGPU abstracts away the swapchain from the user.");
@@ -5679,7 +5765,17 @@ static bool WEBGPU_WaitForSwapchain(SDL_GPURenderer *driverData, SDL_Window *win
 
 static bool WEBGPU_Cancel(SDL_GPUCommandBuffer *commandBuffer)
 {
-    SDL_assert_release(!"WEBGPU_Cancel is unimplemented! Reason: I'm lazy.");
+    WebGPUCommandBuffer *wrapper = (WebGPUCommandBuffer *)commandBuffer;
+
+    for (int i = 0; i < wrapper->numQueuedUniformUploads; i++) {
+        SDL_free(wrapper->queuedUniformUploads[i].data);
+    }
+
+    WEBGPU_INTERNAL_ReleaseTrackedResources(&wrapper->submitted);
+    WEBGPU_INTERNAL_ReleaseAcquiredSwapchainTextures(wrapper);
+    wgpuCommandEncoderRelease(wrapper->encoder);
+    WEBGPU_INTERNAL_FreeCommandBuffer(wrapper);
+
     return true;
 }
 
@@ -5927,7 +6023,6 @@ static SDL_GPUDevice *WEBGPU_CreateDevice(bool debugMode, bool preferLowPower, S
 
     renderer->debugMode = debugMode;
     renderer->preferLowPower = preferLowPower;
-    renderer->shouldRecreateLostDevice = true;
     renderer->props = SDL_CreateProperties();
     renderer->bindGroupsExpireAfter = bindGroupsExpireAfter;
     renderer->maxFramesInFlight = 2; // Default
@@ -5946,34 +6041,69 @@ static SDL_GPUDevice *WEBGPU_CreateDevice(bool debugMode, bool preferLowPower, S
         SDL_Log("Failed to copy properties! Oh no!\n%s", SDL_GetError());
     }
 
+    WGPUInstance externalInstance = SDL_GetPointerProperty(props, SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_INSTANCE_POINTER, NULL);
+    WGPUAdapter externalAdapter = SDL_GetPointerProperty(props, SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_ADAPTER_POINTER, NULL);
+    WGPUDevice externalDevice = SDL_GetPointerProperty(props, SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_DEVICE_POINTER, NULL);
+
+    // Futures are waited on through renderer->instance, so adopted objects must come from an adopted instance.
+    if (externalDevice != NULL && externalAdapter == NULL) {
+        SDL_SetError("SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_DEVICE_POINTER requires SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_ADAPTER_POINTER");
+        WEBGPU_INTERNAL_DestroyPartialRenderer(renderer);
+        return NULL;
+    }
+    if (externalAdapter != NULL && externalInstance == NULL) {
+        SDL_SetError("SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_ADAPTER_POINTER requires SDL_PROP_GPU_DEVICE_CREATE_WEBGPU_INSTANCE_POINTER");
+        WEBGPU_INTERNAL_DestroyPartialRenderer(renderer);
+        return NULL;
+    }
+
+    if (externalInstance != NULL) {
+        wgpuInstanceAddRef(externalInstance);
+        renderer->instance = externalInstance;
+    } else {
 // I do not like MSVC.
 #ifdef _MSC_VER
-    renderer->instance = wgpuCreateInstance(&(WGPUInstanceDescriptor)WGPU_INSTANCE_DESCRIPTOR_INIT);
+        renderer->instance = wgpuCreateInstance(&(WGPUInstanceDescriptor)WGPU_INSTANCE_DESCRIPTOR_INIT);
 #else
-    renderer->instance = wgpuCreateInstance(&WGPU_INSTANCE_DESCRIPTOR_INIT);
+        renderer->instance = wgpuCreateInstance(&WGPU_INSTANCE_DESCRIPTOR_INIT);
 #endif
+    }
 
     if (!renderer->instance) {
-        SDL_free(renderer);
+        SDL_SetError("Could not create WebGPU instance!");
+        WEBGPU_INTERNAL_DestroyPartialRenderer(renderer);
         return NULL;
     }
 
-    WEBGPU_INTERNAL_RequestAdapter(renderer, &getAdapterSucceeded);
+    if (externalAdapter != NULL) {
+        wgpuAdapterAddRef(externalAdapter);
+        renderer->adapter = externalAdapter;
+    } else {
+        WEBGPU_INTERNAL_RequestAdapter(renderer, &getAdapterSucceeded);
+    }
 
     if (!renderer->adapter) {
-        wgpuInstanceRelease(renderer->instance);
-
-        SDL_free(renderer);
+        SDL_SetError("Could not get WebGPU adapter!");
+        WEBGPU_INTERNAL_DestroyPartialRenderer(renderer);
         return NULL;
     }
 
-    WEBGPU_INTERNAL_RequestDevice(renderer, &getDeviceSucceeded);
+    if (externalDevice != NULL) {
+        if (!WEBGPU_INTERNAL_DeviceHasRequiredFeatures(externalDevice)) {
+            SDL_SetError("Adopted WebGPU device lacks required features, see the log");
+            WEBGPU_INTERNAL_DestroyPartialRenderer(renderer);
+            return NULL;
+        }
+        wgpuDeviceAddRef(externalDevice);
+        renderer->device = externalDevice;
+    } else {
+        WEBGPU_INTERNAL_RequestDevice(renderer, &getDeviceSucceeded);
+        renderer->ownsDevice = true;
+    }
 
     if (!renderer->device) {
-        wgpuAdapterRelease(renderer->adapter);
-        wgpuInstanceRelease(renderer->instance);
-
-        SDL_free(renderer);
+        SDL_SetError("Could not get WebGPU device!");
+        WEBGPU_INTERNAL_DestroyPartialRenderer(renderer);
         return NULL;
     }
 
