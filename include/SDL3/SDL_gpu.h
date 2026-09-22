@@ -2870,6 +2870,11 @@ extern SDL_DECLSPEC SDL_PropertiesID SDLCALL SDL_GetGPUDeviceProperties(SDL_GPUD
  *
  * - `SDL_PROP_GPU_COMPUTEPIPELINE_CREATE_NAME_STRING`: a name that can be
  *   displayed in debugging tools.
+ * - `SDL_PROP_GPU_COMPUTEPIPELINE_CREATE_WEBGPU_UNFILTERABLE_SAMPLER_SLOTS_NUMBER`:
+ *   (WebGPU only) a bitmask of sampler slots whose texture is sampled as an
+ *   unfilterable float, for example a depth texture declared as
+ *   `texture_2d<f32>`. Bit N marks the texture and sampler bound to slot N via
+ *   SDL_BindGPUComputeSamplers(). See SDL_CreateGPUShader() for details.
  *
  * \param device a GPU Context.
  * \param createinfo a struct describing the state of the compute pipeline to
@@ -2887,6 +2892,7 @@ extern SDL_DECLSPEC SDL_GPUComputePipeline * SDLCALL SDL_CreateGPUComputePipelin
     const SDL_GPUComputePipelineCreateInfo *createinfo);
 
 #define SDL_PROP_GPU_COMPUTEPIPELINE_CREATE_NAME_STRING "SDL.gpu.computepipeline.create.name"
+#define SDL_PROP_GPU_COMPUTEPIPELINE_CREATE_WEBGPU_UNFILTERABLE_SAMPLER_SLOTS_NUMBER "SDL.gpu.computepipeline.create.webgpu.unfilterable_sampler_slots"
 
 /**
  * Creates a pipeline object to be used in a graphics workflow.
@@ -3157,28 +3163,37 @@ extern SDL_DECLSPEC SDL_GPUSampler * SDLCALL SDL_CreateGPUSampler(
  *
  * The most common unsupported format is any depth format. Attempting to sample
  * a depth format will fail unless you're either using a comparison sampler, or
- * you forced `WGPUTextureSampleType_Float` through the macro-ish comment
- * `//SDLGPU_ForceAllowSamplingForTexture(group, binding)`
+ * you mark the sampler slot as unfilterable through
+ * `SDL_PROP_GPU_SHADER_CREATE_WEBGPU_UNFILTERABLE_SAMPLER_SLOTS_NUMBER`.
  *
- * This is an SDLGPU specific hint, which forces a binding and its corresponding
- * sampler to be unfilterable. This allows the shader to (e.g) sample depth textures
- * as if they were regular `f32` textures.
+ * This is an SDLGPU specific hint, which lays out the texture and its
+ * corresponding sampler as unfilterable. This allows the shader to (e.g) sample
+ * depth textures as if they were regular `f32` textures. The SDL_GPUSampler
+ * bound to that slot must use SDL_GPU_FILTER_NEAREST for its min, mag, and
+ * mipmap filters and must not enable anisotropy, since WebGPU rejects a
+ * filtering sampler in an unfilterable slot.
  *
  * **Example**
- * 
+ *
  * ```wgsl
- * // BAD! This will throw an error when bound, since the backend expects a 
- * // texture format which supports float filtering!
- * @group(0) @binding(0) var depthTexture: texture_2d<f32>; 
- *
- * // However, if you were to add this comment to your WGSL source, it will 
- * // tell the backend to expect an unfilterable texture format.
- * // SDLGPU_ForceAllowSamplingForTexture(0, 0)
- *
+ * // With this declaration alone, binding a depth texture to slot 0 fails at
+ * // draw time, since the backend lays the slot out as a filterable float texture.
+ * @group(2) @binding(0) var depthTexture: texture_2d<f32>;
+ * @group(2) @binding(1) var depthSampler: sampler;
  * ```
- * 
- * The "macro" is forced to be a comment, since WGSL does not currently have a system
- * for implementing custom functions.
+ *
+ * ```c
+ * // Marking fragment sampler slot 0 as unfilterable makes the layout accept it.
+ * SDL_PropertiesID props = SDL_CreateProperties();
+ * SDL_SetNumberProperty(props, SDL_PROP_GPU_SHADER_CREATE_WEBGPU_UNFILTERABLE_SAMPLER_SLOTS_NUMBER, 1 << 0);
+ * createinfo.props = props;
+ * SDL_GPUShader *shader = SDL_CreateGPUShader(device, &createinfo);
+ * SDL_DestroyProperties(props);
+ * ```
+ *
+ * The older in-source comment `//SDLGPU_ForceAllowSamplingForTexture(group, binding)`
+ * is still honoured, but the property is preferred since comments may be stripped
+ * by shader tooling.
  *
  * ---
  *
@@ -3198,6 +3213,12 @@ extern SDL_DECLSPEC SDL_GPUSampler * SDLCALL SDL_CreateGPUSampler(
  *
  * - `SDL_PROP_GPU_SHADER_CREATE_NAME_STRING`: a name that can be displayed in
  *   debugging tools.
+ * - `SDL_PROP_GPU_SHADER_CREATE_WEBGPU_UNFILTERABLE_SAMPLER_SLOTS_NUMBER`:
+ *   (WebGPU only) a bitmask of sampler slots whose texture is sampled as an
+ *   unfilterable float, for example a depth texture declared as
+ *   `texture_2d<f32>`. Bit N marks the texture and sampler bound to slot N via
+ *   SDL_BindGPUVertexSamplers() or SDL_BindGPUFragmentSamplers(). See the
+ *   WGSL section above.
  *
  * \param device a GPU Context.
  * \param createinfo a struct describing the state of the shader to create.
@@ -3214,6 +3235,7 @@ extern SDL_DECLSPEC SDL_GPUShader * SDLCALL SDL_CreateGPUShader(
     const SDL_GPUShaderCreateInfo *createinfo);
 
 #define SDL_PROP_GPU_SHADER_CREATE_NAME_STRING "SDL.gpu.shader.create.name"
+#define SDL_PROP_GPU_SHADER_CREATE_WEBGPU_UNFILTERABLE_SAMPLER_SLOTS_NUMBER "SDL.gpu.shader.create.webgpu.unfilterable_sampler_slots"
 
 /**
  * Creates a texture object to be used in graphics or compute workflows.
